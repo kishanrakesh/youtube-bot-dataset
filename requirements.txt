@@ -1,0 +1,12 @@
+google-api-python-client
+google-cloud-storage
+google-cloud-firestore
+google-cloud-bigquery
+google-auth
+requests
+playwright
+python-dateutil
+iso8601
+tqdm
+opencv-python
+dotenv

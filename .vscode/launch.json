@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug register_commenters",
+      "type": "python",
+      "request": "launch",
+      "module": "app.pipeline.register_commenters",
+      "justMyCode": true,
+      "args": ["--limit", "500"],
+      "envFile": "${workspaceFolder}/.env"
+    }
+  ]
+}

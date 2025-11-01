@@ -1,0 +1,92 @@
+{
+  "kind": "youtube#channelSectionListResponse",
+  "etag": "LPm4vc5E4jiDoOLLOBfl5rUy9CM",
+  "items": [
+    {
+      "kind": "youtube#channelSection",
+      "etag": "J1Up2ewjlpB0Gd97HnPSP6bqPpA",
+      "id": "UCC0wvlGND7w_nODFDu-0ZFA.jNQXAC9IVRw",
+      "snippet": {
+        "type": "channelsectiontypeundefined",
+        "channelId": "UCC0wvlGND7w_nODFDu-0ZFA",
+        "position": 0
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "oUEwCHlg2_iS9zZdSrTde8Rgxyg",
+      "id": "UCC0wvlGND7w_nODFDu-0ZFA.LeAltgu_pbM",
+      "snippet": {
+        "type": "recentuploads",
+        "channelId": "UCC0wvlGND7w_nODFDu-0ZFA",
+        "position": 1
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "4js7jhMg3TisvXdC2jKDLwJna70",
+      "id": "UCC0wvlGND7w_nODFDu-0ZFA.nGzAI5pLbMY",
+      "snippet": {
+        "type": "channelsectiontypeundefined",
+        "channelId": "UCC0wvlGND7w_nODFDu-0ZFA",
+        "position": 2
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "VR8onOP_z0w2U5G2RMLzlnD2wUo",
+      "id": "UCC0wvlGND7w_nODFDu-0ZFA.__WLXNpu6u8",
+      "snippet": {
+        "type": "completedevents",
+        "channelId": "UCC0wvlGND7w_nODFDu-0ZFA",
+        "position": 3
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "W9ZifpRSTO4indquOM8jGNeIlgg",
+      "id": "UCC0wvlGND7w_nODFDu-0ZFA.Zx4DA4xg9IM",
+      "snippet": {
+        "type": "allplaylists",
+        "channelId": "UCC0wvlGND7w_nODFDu-0ZFA",
+        "position": 4
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "Q6sOq0wzRxsq128Zh9ygb1N_DfU",
+      "id": "UCC0wvlGND7w_nODFDu-0ZFA.MykmTeTiooA",
+      "snippet": {
+        "type": "channelsectiontypeundefined",
+        "channelId": "UCC0wvlGND7w_nODFDu-0ZFA",
+        "position": 5
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "FNv2dd7BGD-yc4FzZrBI4tCvE14",
+      "id": "UCC0wvlGND7w_nODFDu-0ZFA.iJLXf_7B368",
+      "snippet": {
+        "type": "channelsectiontypeundefined",
+        "channelId": "UCC0wvlGND7w_nODFDu-0ZFA",
+        "position": 6
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "vJuGNvWTYyVtk3mbbfcbLbXgL-k",
+      "id": "UCC0wvlGND7w_nODFDu-0ZFA.UgY69lf0UCE",
+      "snippet": {
+        "type": "multiplechannels",
+        "channelId": "UCC0wvlGND7w_nODFDu-0ZFA",
+        "title": "\ud83d\udc47\ud83d\udc47\ud83c\udf6d\ud83d\udc47\ud83d\udc47\ud83d\udc98",
+        "position": 7
+      },
+      "contentDetails": {
+        "channels": [
+          "UCkY-r_pAD2ED6PjfZIfuhTw"
+        ]
+      }
+    }
+  ]
+}
