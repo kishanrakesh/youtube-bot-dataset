@@ -19,7 +19,8 @@ _youtube = None
 
 # Environment variables
 GCS_BUCKET_DATA = os.getenv("GCS_BUCKET_DATA", "your-default-bucket-name")
-API_KEY = os.getenv("GCP_API_KEY")  # Required for YouTube API
+# API_KEY = os.getenv("GCP_API_KEY")  # Required for YouTube API
+API_KEY = "AIzaSyADvDBHXJNthXmEcWPJA2HtrpsEX3dQnNQ"
 
 def get_gcs() -> storage.Client:
     global _gcs

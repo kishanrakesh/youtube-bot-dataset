@@ -22,6 +22,8 @@ from google.cloud import firestore, storage
 # from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 import asyncio
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+from app.pipeline.expand_bot_graph import PlaywrightContext, get_channel_url
+from app.utils.gcs_utils import upload_png  # reuse your existing GCS helper
 
 # ───── config ─────
 LOGGER = logging.getLogger("screenshot")
@@ -85,70 +87,50 @@ async def wait_for_image(page, selector: str, timeout: int = 15000):
 
 
 # ───── main capture ─────
-async def save_screenshots(doc_snaps: List[firestore.DocumentSnapshot], parallel_tabs: int = 5):
-    """
-    Capture screenshots for given Firestore docs.
-    parallel_tabs=1  → sequential (default, safe).
-    parallel_tabs>1 → reuse multiple tabs in a round-robin fashion.
-    """
+async def save_screenshots(doc_snaps: List[firestore.DocumentSnapshot], parallel_tabs: int = 3):
     total = len(doc_snaps)
     if total == 0:
         LOGGER.info("No channels to process.")
         return
 
     LOGGER.info(f"📥 Starting screenshot capture for {total} channels (parallel_tabs={parallel_tabs})")
-
     success, failed = 0, 0
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
+    async with PlaywrightContext() as ctx:  # ✅ use shared context
+        sem = asyncio.Semaphore(parallel_tabs)
 
         async def process_channel(snap, idx: int):
             nonlocal success, failed
             cid = snap.id
-            url = f"https://www.youtube.com/channel/{cid}"
-            try:
-                page = await context.new_page()
-                await page.goto(url, timeout=PAGE_TIMEOUT_MS, wait_until="networkidle")
-                png = await page.screenshot(full_page=False)
-                await page.close()
+            url = get_channel_url(cid)
 
-                gcs_uri = upload_png(cid, png)
-                snap.reference.update({
-                    "screenshot_gcs_uri": gcs_uri,
-                    "is_screenshot_stored": True,
-                    "screenshot_stored_at": datetime.utcnow(),
-                    "last_checked_at": datetime.utcnow()
-                })
-
-                success += 1
-                LOGGER.info("📸 [%d/%d] %s → %s", idx, total, cid, gcs_uri)
-
-            except PWTimeout:
-                failed += 1
-                LOGGER.warning("⏱️ [%d/%d] Timeout loading %s", idx, total, url)
-            except Exception as exc:
-                failed += 1
-                LOGGER.warning("❌ [%d/%d] Error loading %s: %s", idx, total, url, exc)
-
-            # log every 10 processed
-            if (idx % 10 == 0) or (idx == total):
-                LOGGER.info("   Progress: %d/%d done (✅ %d ok, ❌ %d failed)",
-                            idx, total, success, failed)
-
-        # run N at a time with semaphore
-        sem = asyncio.Semaphore(parallel_tabs)
-
-        async def sem_task(snap, idx: int):
             async with sem:
-                await process_channel(snap, idx)
+                try:
+                    page = await ctx.new_page()
+                    await page.goto(url, timeout=60000)
+                    await page.wait_for_selector("#contents", timeout=20000)
+                    await page.evaluate("window.scrollBy(0, 800)")
+                    await asyncio.sleep(2)
+                    png = await page.screenshot(full_page=True)
+                    await page.close()
 
-        await asyncio.gather(*(sem_task(s, i) for i, s in enumerate(doc_snaps, start=1)))
-        await browser.close()
+                    gcs_uri = upload_png(cid, png)
+                    snap.reference.update({
+                        "screenshot_gcs_uri": gcs_uri,
+                        "is_screenshot_stored": True,
+                        "screenshot_stored_at": datetime.utcnow(),
+                        "last_checked_at": datetime.utcnow()
+                    })
+                    success += 1
+                    LOGGER.info(f"📸 [{idx}/{total}] {cid} → {gcs_uri}")
 
-    LOGGER.info("🎉 Finished screenshots: %d total (✅ %d ok, ❌ %d failed)", total, success, failed)
+                except Exception as e:
+                    failed += 1
+                    LOGGER.warning(f"❌ [{idx}/{total}] {cid}: {e}")
 
+        await asyncio.gather(*(process_channel(s, i) for i, s in enumerate(doc_snaps, start=1)))
+
+    LOGGER.info(f"🎉 Finished screenshots: ✅ {success} ok, ❌ {failed} failed")
 
 
 # ───── driver ─────

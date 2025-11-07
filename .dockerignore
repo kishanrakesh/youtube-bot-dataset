@@ -1,0 +1,16 @@
+# .dockerignore
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.tmp
+*.DS_Store
+.env
+venv/
+env/
+.scripts/
+screenshots/
+*.png
+*.jpg
+*.jpeg
+*.gif

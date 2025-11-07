@@ -1,3 +1,4 @@
+#app/screenshots/register_commenter_channels.py
 #!/usr/bin/env python3
 """
 Register commenter channels OR backfill bot probabilities for existing channels.
@@ -23,59 +24,294 @@ from app.pipeline.expand_bot_graph import PlaywrightContext, scrape_about_page
 
 import asyncio
 
-async def register_commenter_channels(bucket: str, gcs_paths: list[str], limit: int = None, concurrency: int = 10) -> None:
+# app/screenshots/register_commenter_channels.py
+#!/usr/bin/env python3
+"""
+Register commenter channels from comment JSONs in GCS, with:
+- Manifest-based resumability (GCS manifest: completed & in_progress).
+- LIMIT applies to number of JSON files processed.
+- Streaming parse of large JSONs using ijson (low memory).
+- Bounded concurrency via asyncio.Queue and worker pool.
+- Batched Firestore commits (default 100).
+- Reuses your PlaywrightContext + scrape_about_page.
+- Preserves existing Firestore doc schema and avatar/XGB logic.
+"""
+
+import logging, os, asyncio, json, time
+from datetime import datetime
+from typing import Optional, Set, List
+
+import ijson
+from google.cloud import firestore, storage
+
+from app.utils.image_processing import classify_avatar_url, get_xgb_model
+from app.pipeline.expand_bot_graph import PlaywrightContext, scrape_about_page
+
+LOGGER = logging.getLogger("register_commenters")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+COLLECTION_NAME = "channel"
+
+
+# ------------------------- Manifest helpers -------------------------
+
+def _storage_client():
+    return storage.Client()
+
+def _manifest_load(bucket: str, manifest_path: str) -> dict:
+    """Load manifest JSON from GCS or return default structure."""
+    client = _storage_client()
+    blob = client.bucket(bucket).blob(manifest_path)
+    if not blob.exists():
+        return {"completed": [], "in_progress": None, "last_run": None}
+    try:
+        return json.loads(blob.download_as_bytes())
+    except Exception:
+        return {"completed": [], "in_progress": None, "last_run": None}
+
+def _manifest_save(bucket: str, manifest_path: str, manifest: dict) -> None:
+    client = _storage_client()
+    blob = client.bucket(bucket).blob(manifest_path)
+    manifest["last_run"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    blob.upload_from_string(json.dumps(manifest, ensure_ascii=False))
+
+def _manifest_mark_in_progress(bucket: str, manifest_path: str, gcs_path: str) -> None:
+    m = _manifest_load(bucket, manifest_path)
+    m["in_progress"] = gcs_path
+    _manifest_save(bucket, manifest_path, m)
+
+def _manifest_mark_completed(bucket: str, manifest_path: str, gcs_path: str) -> None:
+    m = _manifest_load(bucket, manifest_path)
+    if gcs_path not in m.get("completed", []):
+        m.setdefault("completed", []).append(gcs_path)
+    m["in_progress"] = None
+    _manifest_save(bucket, manifest_path, m)
+
+
+# ------------------------- Streaming JSON -------------------------
+
+def _iter_comment_items_from_gcs(bucket: str, blob_path: str):
+    """
+    Incrementally yield each item in the top-level 'items' array of a commentThreads response.
+    Uses ijson to avoid loading the full JSON into memory.
+    """
+    client = _storage_client()
+    blob = client.bucket(bucket).blob(blob_path)
+    with blob.open("rb") as f:
+        for obj in ijson.items(f, "items.item"):
+            yield obj
+
+
+# ------------------------- Firestore batching -------------------------
+
+class _Batcher:
+    """Async-friendly Firestore batcher (commit in a thread)."""
+    def __init__(self, client: firestore.Client, batch_size: int = 100):
+        self.client = client
+        self.batch_size = batch_size
+        self._batch = self.client.batch()
+        self._count = 0
+        self._lock = asyncio.Lock()
+
+    async def set(self, doc_ref, data, merge=False):
+        async with self._lock:
+            self._batch.set(doc_ref, data, merge=merge)
+            self._count += 1
+            if self._count >= self.batch_size:
+                await self._commit_locked()
+
+    async def _commit_locked(self):
+        batch = self._batch
+        self._batch = self.client.batch()
+        self._count = 0
+        await asyncio.to_thread(batch.commit)
+
+    async def flush(self):
+        async with self._lock:
+            if self._count > 0:
+                await self._commit_locked()
+
+
+# ------------------------- Core extraction helpers -------------------------
+
+def _extract_channel_id_from_thread(thread: dict) -> Optional[str]:
+    try:
+        return thread["snippet"]["topLevelComment"]["snippet"]["authorChannelId"]["value"]
+    except Exception:
+        return None
+
+def _extract_like_count_from_thread(thread: dict) -> int:
+    try:
+        return int(thread["snippet"]["topLevelComment"]["snippet"].get("likeCount", 0))
+    except Exception:
+        return 0
+
+
+# ------------------------- Main entry -------------------------
+
+async def register_commenter_channels(
+    bucket: str,
+    gcs_paths: List[str],
+    *,
+    limit_files: Optional[int] = None,
+    like_threshold: int = 10,
+    manifest_path: str = "manifests/register_commenters/manifest.json",
+    force: bool = False,
+    resume: bool = True,
+) -> None:
+    """
+    Sequential version of register_commenter_channels.
+    Processes each comment JSON in order using a single Playwright browser.
+    Much slower but stable and memory-safe for long-running jobs.
+    """
+
     db = firestore.Client()
-    seen: Set[str] = set()
-    total_new = 0
     model = get_xgb_model()
 
+    manifest = _manifest_load(bucket, manifest_path) if (resume and not force) else {"completed": [], "in_progress": None}
+    completed = set(manifest.get("completed", []))
+    remaining = [p for p in gcs_paths if (force or p not in completed)]
+    if limit_files is not None:
+        remaining = remaining[: max(0, limit_files)]
+
+    LOGGER.info(
+        "🧭 Files to process: %d (completed skipped: %d, force=%s, resume=%s)",
+        len(remaining), len(completed), force, resume
+    )
+
+    total_new = 0
+    seen_this_run: Set[str] = set()
+    batcher = _Batcher(db, batch_size=100)
+
     async with PlaywrightContext() as context:
-        sem = asyncio.Semaphore(concurrency)  # limit concurrent scrapes
+        for idx, gcs_path in enumerate(remaining, start=1):
+            LOGGER.info(f"📥 [{idx}/{len(remaining)}] Processing file: {gcs_path}")
+            _manifest_mark_in_progress(bucket, manifest_path, gcs_path)
 
-        for path_idx, gcs_path in enumerate(gcs_paths, start=1):
-            if limit and total_new >= limit:
-                LOGGER.info(f"⚠️ Reached limit ({limit}) — stopping early.")
-                break
+            for thread in _iter_comment_items_from_gcs(bucket, gcs_path):
+                cid = _extract_channel_id_from_thread(thread)
+                if not cid:
+                    continue
+                if _extract_like_count_from_thread(thread) < like_threshold:
+                    continue
+                if cid in seen_this_run:
+                    continue
+                seen_this_run.add(cid)
 
-            data = read_json_from_gcs(bucket, gcs_path)
-            items = data.get("items", []) if data else []
+                doc_ref = db.collection(COLLECTION_NAME).document(cid)
+                exists = await asyncio.to_thread(lambda: doc_ref.get().exists)
+                if exists:
+                    continue
 
-            async def process_thread(thread):
-                nonlocal total_new
-                top_snip = thread.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
-                if "authorChannelId" not in top_snip or top_snip.get("likeCount", 0) < LIKE_THRESHOLD:
-                    return None
+                avatar_url = (
+                    thread.get("snippet", {})
+                    .get("topLevelComment", {})
+                    .get("snippet", {})
+                    .get("authorProfileImageUrl")
+                )
 
-                cid = top_snip["authorChannelId"]["value"]
-                if cid in seen:
-                    return None
-                seen.add(cid)
+                label, metrics = "MISSING", {}
+                if avatar_url:
+                    try:
+                        label, metrics = classify_avatar_url(avatar_url, size=128, model=model)
+                        if label == "DEFAULT":
+                            LOGGER.info(f"🚫 Skipping default avatar {cid}")
+                            continue
+                    except Exception as e:
+                        LOGGER.warning(f"⚠️ Avatar classification failed for {cid}: {e}")
 
-                async with sem:  # limit concurrency
-                    batch = db.batch()
-                    added = await _init_channel_doc(
-                        context, batch, db, cid,
-                        top_snip.get("authorProfileImageUrl"),
-                        model
+                try:
+                    about_links, subs = await asyncio.wait_for(
+                        scrape_about_page(context, cid),
+                        timeout=20
                     )
-                    if added:
-                        batch.commit()
-                        total_new += 1
-                        LOGGER.info(f"✅ Added {cid}")
-                        return cid
-                return None
+                except asyncio.TimeoutError:
+                    LOGGER.warning(f"⏰ scrape_about_page timeout for {cid}")
+                    about_links, subs = [], []
+                except Exception as e:
+                    LOGGER.warning(f"⚠️ scrape_about_page failed for {cid}: {e}")
+                    about_links, subs = [], []
 
-            # Run all threads concurrently (within concurrency limit)
-            await asyncio.gather(*[
-                process_thread(thread)
-                for thread in items
-            ])
+                if not about_links and not subs:
+                    continue
 
-            LOGGER.info(f"── {path_idx}/{len(gcs_paths):<3} "
-                        f"{os.path.basename(gcs_path):<15} "
-                        f"→ total so far: {total_new}")
+                data = {
+                    "channel_id": cid,
+                    "avatar_url": avatar_url,
+                    "avatar_label": label,
+                    "avatar_metrics": metrics,
+                    "about_links_count": len(about_links),
+                    "featured_channels_count": len(subs),
+                    "is_screenshot_stored": False,
+                    "is_bot_checked": False,
+                    "registered_at": datetime.utcnow(),
+                    "source": "register-commenters",
+                }
+                await batcher.set(doc_ref, data, merge=True)
+                total_new += 1
+                LOGGER.info(f"✅ Added {cid}")
 
-    LOGGER.info(f"🎉 Done! {total_new} total new channels registered.")
+            _manifest_mark_completed(bucket, manifest_path, gcs_path)
+            LOGGER.info(f"✅ Completed file: {gcs_path}")
+
+    await batcher.flush()
+    LOGGER.info(f"🎉 Done! New channels this run: {total_new}")
+
+
+
+# async def register_commenter_channels(bucket: str, gcs_paths: list[str], limit: int = None, concurrency: int = 3) -> None:
+#     db = firestore.Client()
+#     seen: Set[str] = set()
+#     total_new = 0
+#     model = get_xgb_model()
+
+#     async with PlaywrightContext() as context:
+#         sem = asyncio.Semaphore(concurrency)  # limit concurrent scrapes
+
+#         for path_idx, gcs_path in enumerate(gcs_paths, start=1):
+#             if limit and path_idx >= limit:
+#                 LOGGER.info(f"⚠️ Reached JSON file limit ({limit}) — stopping early.")
+#                 break
+
+#             data = read_json_from_gcs(bucket, gcs_path)
+#             items = data.get("items", []) if data else []
+
+#             async def process_thread(thread):
+#                 nonlocal total_new
+#                 top_snip = thread.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
+#                 if "authorChannelId" not in top_snip or top_snip.get("likeCount", 0) < LIKE_THRESHOLD:
+#                     return None
+
+#                 cid = top_snip["authorChannelId"]["value"]
+#                 if cid in seen:
+#                     return None
+#                 seen.add(cid)
+
+#                 async with sem:  # limit concurrency
+#                     batch = db.batch()
+#                     added = await _init_channel_doc(
+#                         context, batch, db, cid,
+#                         top_snip.get("authorProfileImageUrl"),
+#                         model
+#                     )
+#                     if added:
+#                         batch.commit()
+#                         total_new += 1
+#                         LOGGER.info(f"✅ Added {cid}")
+#                         return cid
+#                 return None
+
+#             # Run all threads concurrently (within concurrency limit)
+#             await asyncio.gather(*[
+#                 process_thread(thread)
+#                 for thread in items
+#             ])
+
+#             LOGGER.info(f"── {path_idx}/{len(gcs_paths):<3} "
+#                         f"{os.path.basename(gcs_path):<15} "
+#                         f"→ total so far: {total_new}")
+
+#     LOGGER.info(f"🎉 Done! {total_new} total new channels registered.")
 
 
 

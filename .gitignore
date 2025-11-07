@@ -1,2 +1,102 @@
+# ───── Python build & cache ─────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.env/
+.venv/
 env/
-.env
+venv/
+ENV/
+
+# ───── IDE / Editor ─────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ───── Logs & Outputs ─────
+logs/
+*.log
+nohup.out
+*.tmp
+tmp/
+*.bak
+*.out
+
+# ───── Model & data artifacts ─────
+*.pkl
+*.joblib
+*.h5
+*.csv
+*.json
+*.npy
+*.npz
+*.gz
+*.zip
+
+# If you want to *keep* code JSONs (e.g., sample manifests), allowlist:
+# !app/**/*.json
+
+# ───── Raw data & intermediate folders ─────
+raw/
+screenshots/
+test/
+ranked_channels_*.csv
+channels_*.csv
+bot_metrics.csv
+metric_thresholds.csv
+
+# ───── Secrets & Credentials ─────
+service-account.json
+*.key
+*.pem
+*.crt
+*.credentials
+*.token
+
+# ───── System files ─────
+*.pid
+*.lock
+*.sock
+*.tmp
+*.cache
+*.bak
+*.orig
+*.rej
+
+# ───── OS / Container / Misc ─────
+Thumbs.db
+ehthumbs.db
+desktop.ini
+node_modules/
+*.iml
+*.db
+*.sqlite
+*.sqlite3
+
+# ───── Docker / Cloud run build context ─────
+# Don't ignore Dockerfile itself, but ignore local build artifacts
+*.tar
+*.gz
+*.tgz
+*.zip
+build/
+dist/
+
+# ───── Local runtime scripts ─────
+run_nightly.sh
+tree.txt
+ranked_channels_overfit.csv
+
+# ───── GCP temporary / debug ─────
+app/__pycache__/
+app/utils/__pycache__/
+app/pipeline/__pycache__/
+app/screenshots/__pycache__/
+
+# ───── Optional: ignore local test folders ─────
+test/
