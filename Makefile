@@ -6,6 +6,7 @@ TRENDING_PAGES = 50
 COMMENT_PAGES = 20
 SCREENSHOT_LIMIT = 200
 REVIEW_LIMIT = 100
+EXPAND_USE_API ?= true
 
 # ───── Pipeline commands ─────
 
@@ -54,6 +55,16 @@ review:
 	@echo "👀 Launching manual review UI..."
 	python -m app.pipeline.screenshots.review \
 		--limit $(REVIEW_LIMIT)
+
+.PHONY: expand-channel
+expand-channel:
+	@if [ -z "$(IDENTIFIER)" ]; then \
+		echo "❌ IDENTIFIER is required. Usage: make expand-channel IDENTIFIER=@handle"; \
+		exit 1; \
+	fi
+	python -m app.pipeline.channels.expand_single \
+		$(IDENTIFIER) \
+		$(if $(filter true,$(EXPAND_USE_API)),--use-api,--no-use-api)
 
 # ───── End-to-end workflows ─────
 

@@ -416,7 +416,7 @@ def review_docs(docs: List[firestore.DocumentSnapshot]) -> set:
 
     coords_map = render_grid()
 
-    def mouse_click(event, x, y, flags, param):
+    def mouse_click(event, x, y, _flags, _param):
         nonlocal coords_map
         if event == cv2.EVENT_LBUTTONDOWN:
             for cid, (ix, iy, iw, ih) in coords_map.items():

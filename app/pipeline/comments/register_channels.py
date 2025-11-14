@@ -10,7 +10,6 @@ Features:
 """
 
 import asyncio
-import json
 import logging
 from datetime import datetime
 from typing import Optional, Set, List
@@ -19,7 +18,8 @@ import ijson
 from google.cloud import firestore, storage
 
 from app.utils.image_processing import classify_avatar_url, get_xgb_model
-from app.pipeline.channels.scraping import PlaywrightContext, scrape_about_page
+from app.utils.manifest_utils import ManifestManager
+from app.pipeline.channels.scraping import PlaywrightContext, scrape_about_page, expand_bot_graph_async
 
 LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -28,7 +28,7 @@ COLLECTION_NAME = "channel"
 
 
 # ============================================================================
-# Manifest Helpers
+# Storage Client Helper
 # ============================================================================
 
 def _storage_client() -> storage.Client:
@@ -40,70 +40,8 @@ def _storage_client() -> storage.Client:
     return storage.Client()
 
 
-def _manifest_load(bucket: str, manifest_path: str) -> dict:
-    """Load manifest JSON from GCS or return default structure.
-    
-    Args:
-        bucket: GCS bucket name
-        manifest_path: Path to manifest file in bucket
-        
-    Returns:
-        Manifest dictionary with completed, in_progress, and last_run fields
-    """
-    client = _storage_client()
-    blob = client.bucket(bucket).blob(manifest_path)
-    if not blob.exists():
-        return {"completed": [], "in_progress": None, "last_run": None}
-    try:
-        return json.loads(blob.download_as_bytes())
-    except Exception:
-        return {"completed": [], "in_progress": None, "last_run": None}
-
-
-def _manifest_save(bucket: str, manifest_path: str, manifest: dict) -> None:
-    """Save manifest JSON to GCS with updated timestamp.
-    
-    Args:
-        bucket: GCS bucket name
-        manifest_path: Path to manifest file in bucket
-        manifest: Manifest dictionary to save
-    """
-    client = _storage_client()
-    blob = client.bucket(bucket).blob(manifest_path)
-    manifest["last_run"] = datetime.now().isoformat(timespec="seconds") + "Z"
-    blob.upload_from_string(json.dumps(manifest, ensure_ascii=False))
-
-
-def _manifest_mark_in_progress(bucket: str, manifest_path: str, gcs_path: str) -> None:
-    """Mark a file as currently being processed in the manifest.
-    
-    Args:
-        bucket: GCS bucket name
-        manifest_path: Path to manifest file in bucket
-        gcs_path: Path to file being processed
-    """
-    m = _manifest_load(bucket, manifest_path)
-    m["in_progress"] = gcs_path
-    _manifest_save(bucket, manifest_path, m)
-
-
-def _manifest_mark_completed(bucket: str, manifest_path: str, gcs_path: str) -> None:
-    """Mark a file as completed in the manifest.
-    
-    Args:
-        bucket: GCS bucket name
-        manifest_path: Path to manifest file in bucket
-        gcs_path: Path to completed file
-    """
-    m = _manifest_load(bucket, manifest_path)
-    if gcs_path not in m.get("completed", []):
-        m.setdefault("completed", []).append(gcs_path)
-    m["in_progress"] = None
-    _manifest_save(bucket, manifest_path, m)
-
-
 # ============================================================================
-# Streaming JSON Parser
+# Comment Parsing
 # ============================================================================
 
 def _iter_comment_items_from_gcs(bucket: str, blob_path: str):
@@ -216,6 +154,43 @@ def _extract_like_count_from_thread(thread: dict) -> int:
 
 
 # ============================================================================
+# Channel Expansion for Pending Review
+# ============================================================================
+
+async def expand_channels_for_review(
+    channel_ids: List[str],
+    *,
+    use_api: bool = True
+) -> None:
+    """Expand channels discovered via comments for manual review.
+    
+    Expands channels with is_bot=False and bot_check_type="pending_review",
+    preserving full metadata (avatars, banners, screenshots, About page links)
+    before manual review determines if they are bots.
+    
+    This prevents data loss if channels are deleted/suspended before review.
+    
+    Args:
+        channel_ids: List of channel IDs to expand
+        use_api: Whether to use YouTube Data API for metadata (default: True)
+    """
+    if not channel_ids:
+        LOGGER.info("No channels to expand for review")
+        return
+    
+    LOGGER.info(f"🔍 Expanding {len(channel_ids)} channels for manual review")
+    
+    await expand_bot_graph_async(
+        seed_channels=channel_ids,
+        use_api=use_api,
+        is_bot=False,
+        bot_check_type="pending_review"
+    )
+    
+    LOGGER.info(f"✅ Expansion complete. Channels ready for review.")
+
+
+# ============================================================================
 # Main Registration Function
 # ============================================================================
 
@@ -228,6 +203,8 @@ async def register_commenter_channels(
     manifest_path: str = "manifests/register_commenters/manifest.json",
     force: bool = False,
     resume: bool = True,
+    expand_for_review: bool = True,
+    use_api_for_expansion: bool = True,
 ) -> None:
     """Register commenter channels from GCS comment JSON files.
     
@@ -243,12 +220,19 @@ async def register_commenter_channels(
         manifest_path: Path to manifest file for tracking progress
         force: If True, reprocess completed files
         resume: If True, skip files marked as completed in manifest
+        expand_for_review: If True, expand discovered channels for manual review
+        use_api_for_expansion: If True, use YouTube API during expansion
     """
     db = firestore.Client()
     model = get_xgb_model()
 
-    manifest = _manifest_load(bucket, manifest_path) if (resume and not force) else {"completed": [], "in_progress": None}
-    completed = set(manifest.get("completed", []))
+    # Use ManifestManager instead of manual manifest functions
+    manifest_manager = ManifestManager(bucket=bucket, manifest_path=manifest_path)
+    
+    if force:
+        manifest_manager.reset()
+    
+    completed = set(manifest_manager.get_completed()) if resume else set()
     remaining = [p for p in gcs_paths if (force or p not in completed)]
     if limit_files is not None:
         remaining = remaining[: max(0, limit_files)]
@@ -260,12 +244,13 @@ async def register_commenter_channels(
 
     total_new = 0
     seen_this_run: Set[str] = set()
+    new_channels: List[str] = []  # Track newly added channels for expansion
     batcher = _Batcher(db, batch_size=100)
 
     async with PlaywrightContext() as context:
         for idx, gcs_path in enumerate(remaining, start=1):
             LOGGER.info(f"📥 [{idx}/{len(remaining)}] Processing file: {gcs_path}")
-            _manifest_mark_in_progress(bucket, manifest_path, gcs_path)
+            manifest_manager.mark_in_progress(gcs_path)
 
             for thread in _iter_comment_items_from_gcs(bucket, gcs_path):
                 cid = _extract_channel_id_from_thread(thread)
@@ -278,10 +263,13 @@ async def register_commenter_channels(
                 seen_this_run.add(cid)
 
                 doc_ref = db.collection(COLLECTION_NAME).document(cid)
+                LOGGER.info(f"🔍 Checking if {cid} already exists in Firestore...")
                 exists = await asyncio.to_thread(lambda: doc_ref.get().exists)
                 if exists:
+                    LOGGER.info(f"⏭️ Skipping {cid} - already exists")
                     continue
 
+                LOGGER.info(f"🆕 Processing new channel {cid}")
                 avatar_url = (
                     thread.get("snippet", {})
                     .get("topLevelComment", {})
@@ -292,28 +280,29 @@ async def register_commenter_channels(
                 label, metrics = "MISSING", {}
                 if avatar_url:
                     try:
+                        LOGGER.info(f"🖼️ Classifying avatar for {cid}...")
                         label, metrics = classify_avatar_url(avatar_url, size=128, model=model)
                         if label == "DEFAULT":
                             LOGGER.info(f"🚫 Skipping default avatar {cid}")
                             continue
+                        LOGGER.info(f"✅ Avatar classified as {label} for {cid}")
                     except Exception as e:
                         LOGGER.warning(f"⚠️ Avatar classification failed for {cid}: {e}")
 
                 try:
-                    about_links, subs = await asyncio.wait_for(
-                        scrape_about_page(context, cid),
-                        timeout=20
-                    )
-                except asyncio.TimeoutError:
-                    LOGGER.warning(f"⏰ scrape_about_page timeout for {cid}")
-                    about_links, subs = [], []
+                    LOGGER.info(f"🌐 Scraping About page for {cid}...")
+                    about_links, subs = await scrape_about_page(context, cid)
+                    LOGGER.info(f"📊 Found {len(about_links)} links and {len(subs)} subs for {cid}")
                 except Exception as e:
                     LOGGER.warning(f"⚠️ scrape_about_page failed for {cid}: {e}")
                     about_links, subs = [], []
+                    await asyncio.sleep(1)
 
                 if not about_links and not subs:
+                    LOGGER.info(f"⏭️ Skipping {cid} - no links or subs found")
                     continue
 
+                LOGGER.info(f"💾 Saving {cid} to Firestore...")
                 data = {
                     "channel_id": cid,
                     "avatar_url": avatar_url,
@@ -327,14 +316,24 @@ async def register_commenter_channels(
                     "source": "register-commenters",
                 }
                 await batcher.set(doc_ref, data, merge=True)
+                new_channels.append(cid)  # Track for expansion
+                LOGGER.info(f"✅ Successfully registered {cid}")
                 total_new += 1
                 LOGGER.info(f"✅ Added {cid}")
 
-            _manifest_mark_completed(bucket, manifest_path, gcs_path)
+            manifest_manager.mark_completed(gcs_path)
             LOGGER.info(f"✅ Completed file: {gcs_path}")
 
     await batcher.flush()
     LOGGER.info(f"🎉 Done! New channels this run: {total_new}")
+    
+    # Expand newly discovered channels for manual review
+    if expand_for_review and new_channels:
+        LOGGER.info(f"🔍 Starting expansion for {len(new_channels)} newly discovered channels...")
+        await expand_channels_for_review(
+            channel_ids=new_channels,
+            use_api=use_api_for_expansion
+        )
 
 
 async def _init_channel_doc(

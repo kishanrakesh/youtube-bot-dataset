@@ -3,6 +3,35 @@
 from datetime import date
 from typing import Optional
 
+__all__ = [
+    # Video paths
+    "trending_video_raw_path",
+    "trending_video_manifest_path",
+    "trending_seen_path",
+    "video_by_channel_raw_path",
+    "video_by_id_raw_path",
+    "video_metadata_seen_path",
+    "video_comments_path",
+    "video_comments_seen_path",
+    "videos_by_channel_seen_path",
+    # Channel paths
+    "channel_metadata_raw_path",
+    "channel_metadata_seen_path",
+    "channel_metadata_manifest_path",
+    "channel_sections_raw_path",
+    "channel_sections_seen_path",
+    "channel_sections_manifest_path",
+    # Domain paths
+    "domain_seen_path",
+    "domain_whois_raw_path",
+    "domain_enrichment_completed_path",
+    "domain_ready_path",
+    "domain_completed_path",
+    # Screenshot paths
+    "screenshot_ready_path",
+    "screenshot_completed_path",
+]
+
 BASE = "youtube-bot-dataset"
 
 

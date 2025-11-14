@@ -1,6 +1,5 @@
 import json
 from typing import List, Dict
-from googleapiclient.discovery import Resource
 from googleapiclient.errors import HttpError
 from app.utils.clients import get_youtube
 from app.utils.gcs_utils import read_json_from_gcs, write_json_to_gcs, file_exists_in_gcs

@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import List
 
 from google.cloud import firestore, storage
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+from playwright.async_api import async_playwright
 
 from app.pipeline.channels.scraping import PlaywrightContext, get_channel_url
 from app.utils.gcs_utils import upload_png
@@ -113,14 +113,66 @@ async def save_screenshots(
             url = get_channel_url(cid)
 
             async with sem:
+                page = None
                 try:
                     page = await ctx.new_page()
-                    await page.goto(url, timeout=60000)
-                    await page.wait_for_selector("#contents", timeout=20000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    
+                    # Give YouTube's JavaScript a moment to render the alert or content
+                    await asyncio.sleep(2)
+                    
+                    # Check if channel has been removed/taken down OR if normal content loads
+                    # YouTube shows yt-alert-renderer for removed/suspended channels
+                    # Wait for whichever appears first: error alert or normal content
+                    channel_removed = False
+                    try:
+                        # Check which element exists on the page
+                        alert = await page.query_selector("yt-alert-renderer")
+                        contents = await page.query_selector("#contents")
+                        
+                        if alert and not contents:
+                            # Channel has been removed/suspended
+                            error_text = await alert.inner_text()
+                            LOGGER.warning(f"⛔ [{idx}/{total}] {cid} - Channel unavailable: {error_text.strip()[:100]}")
+                            failed += 1
+                            channel_removed = True
+                        elif contents:
+                            # Normal channel, continue to screenshot
+                            pass
+                        else:
+                            # Neither found - unexpected, wait a bit more
+                            await asyncio.sleep(3)
+                            alert = await page.query_selector("yt-alert-renderer")
+                            contents = await page.query_selector("#contents")
+                            if alert:
+                                error_text = await alert.inner_text()
+                                LOGGER.warning(f"⛔ [{idx}/{total}] {cid} - Channel unavailable: {error_text.strip()[:100]}")
+                                failed += 1
+                                channel_removed = True
+                            elif not contents:
+                                raise Exception("Neither alert nor contents found after 5 seconds")
+                        
+                    except Exception as e:
+                        # Timeout waiting for either selector
+                        failed += 1
+                        LOGGER.warning(f"❌ [{idx}/{total}] {cid}: Timeout waiting for page content: {e}")
+                        return
+                    
+                    # Exit early if channel was removed
+                    if channel_removed:
+                        # Mark as processed so we don't keep trying to screenshot a removed channel
+                        snap.reference.update({
+                            "is_screenshot_stored": True,
+                            "screenshot_gcs_uri": None,  # No screenshot available
+                            "channel_status": "removed",
+                            "last_checked_at": datetime.utcnow()
+                        })
+                        return
+                    
+                    # At this point, #contents is already visible, so continue with screenshot
                     await page.evaluate("window.scrollBy(0, 800)")
                     await asyncio.sleep(2)
                     png = await page.screenshot(full_page=True)
-                    await page.close()
 
                     gcs_uri = upload_png(cid, png)
                     snap.reference.update({
@@ -136,6 +188,13 @@ async def save_screenshots(
                 except Exception as e:
                     failed += 1
                     LOGGER.warning(f"❌ [{idx}/{total}] {cid}: {e}")
+                
+                finally:
+                    if page:
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
 
         await asyncio.gather(*(process_channel(s, i) for i, s in enumerate(doc_snaps, start=1)))
 

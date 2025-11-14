@@ -37,11 +37,21 @@ from app.utils.paths import (
 from app.utils.image_processing import classify_avatar_url
 from app.env import GCS_BUCKET_DATA
 
+__all__ = [
+    "PlaywrightContext",
+    "get_channel_url",
+    "scrape_about_page",
+    "expand_bot_graph_async",
+]
+
 LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 db = firestore.Client()
-USE_API = False
+
+CHANNEL_PARTS = (
+    "id,snippet,statistics,brandingSettings,topicDetails,status,contentDetails"
+)
 
 USER_AGENTS = [
     # Chrome (Windows / macOS / Linux)
@@ -114,7 +124,6 @@ class PlaywrightContext:
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--disable-features=IsolateOrigins,site-per-process",
-                "--single-process",
                 "--no-first-run",
                 "--disable-extensions",
             ],
@@ -127,10 +136,20 @@ class PlaywrightContext:
             java_script_enabled=True,
             accept_downloads=False,
             bypass_csp=True,
-            extra_http_headers={"accept-language": "en-US,en;q=0.9"},
+            extra_http_headers={
+                "accept-language": "en-US,en;q=0.9",
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "accept-encoding": "gzip, deflate, br",
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-site": "none",
+                "upgrade-insecure-requests": "1",
+            },
         )
         await context.add_init_script("""() => {
             Object.defineProperty(navigator, 'webdriver', {get: () => false});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
         }""")
         return browser, context
 
@@ -148,22 +167,24 @@ class PlaywrightContext:
 
         try:
             page = await self.context.new_page()
-            page.set_default_navigation_timeout(60000)
+            page.set_default_navigation_timeout(90000)
+            page.set_default_timeout(30000)
             return page
         except Exception as e:
             LOGGER.warning(f"⚠️ Browser crashed ({e}), relaunching")
             self.browser, self.context = await self._launch_browser()
             page = await self.context.new_page()
-            page.set_default_navigation_timeout(60000)
+            page.set_default_navigation_timeout(90000)
+            page.set_default_timeout(30000)
             return page
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(self, _exc_type, _exc, _tb) -> None:
         """Clean up browser and Playwright on context exit.
         
         Args:
-            exc_type: Exception type (if any)
-            exc: Exception instance (if any)
-            tb: Exception traceback (if any)
+            _exc_type: Exception type (if any) - unused
+            _exc: Exception instance (if any) - unused
+            _tb: Exception traceback (if any) - unused
         """
         try:
             if self.context:
@@ -288,7 +309,41 @@ async def capture_home_screenshot(
     page = await context.new_page()
     try:
         await page.goto(url, timeout=60000)
-        await page.wait_for_selector("#contents", state="visible", timeout=15000)
+        
+        # Give YouTube's JavaScript a moment to render the alert or content
+        await asyncio.sleep(2)
+        
+        # Check if channel has been removed/taken down OR if normal content loads
+        # YouTube shows yt-alert-renderer for removed/suspended channels
+        channel_removed = False
+        try:
+            alert = await page.query_selector("yt-alert-renderer")
+            contents = await page.query_selector("#contents")
+            
+            if alert and not contents:
+                error_text = await alert.inner_text()
+                LOGGER.warning(f"⛔ Channel {identifier} unavailable: {error_text.strip()[:100]}")
+                channel_removed = True
+            elif not contents:
+                # Neither found - wait a bit more
+                await asyncio.sleep(3)
+                alert = await page.query_selector("yt-alert-renderer")
+                contents = await page.query_selector("#contents")
+                if alert:
+                    error_text = await alert.inner_text()
+                    LOGGER.warning(f"⛔ Channel {identifier} unavailable: {error_text.strip()[:100]}")
+                    channel_removed = True
+                elif not contents:
+                    raise Exception("Neither alert nor contents found")
+        except Exception as e:
+            LOGGER.warning(f"⚠️ Timeout waiting for page content on {identifier}: {e}")
+            return None
+        
+        # Exit early if channel was removed
+        if channel_removed:
+            return None
+        
+        # At this point, #contents is already visible
         await page.evaluate("window.scrollBy(0, 800)")  # Force load more elements
         await asyncio.sleep(3)  # Give time for thumbnails to render
         png = await page.screenshot(full_page=True)
@@ -300,28 +355,65 @@ async def capture_home_screenshot(
         await page.close()
 
 
-def resolve_handle_to_id(youtube, handle: str) -> Optional[str]:
-    """Resolve @handle to channel ID using YouTube API search.
-    
-    Args:
-        youtube: YouTube API client
-        handle: Handle string (e.g., '@username')
-        
-    Returns:
-        Channel ID (UCxxx...), or None if not found
-    """
+def _normalize_handle(identifier: str) -> Optional[str]:
+    """Extract bare handle text (@foo → foo)."""
+    if not identifier or identifier.startswith("UC"):
+        return None
+    handle = identifier.lstrip("@")
+    return handle or None
+
+
+def fetch_channel_item(youtube, identifier: str) -> Optional[dict]:
+    """Fetch full channel metadata for an identifier (UC ID or handle)."""
+    if not youtube or not identifier:
+        return None
+
     try:
-        q = handle.lstrip("@")
-        resp = youtube.search().list(
-            part="snippet", q=q, type="channel", maxResults=1
-        ).execute()
-        print(resp)
+        if identifier.startswith("UC"):
+            resp = (
+                youtube.channels()
+                .list(part=CHANNEL_PARTS, id=identifier, maxResults=1)
+                .execute()
+            )
+        else:
+            handle = _normalize_handle(identifier)
+            if not handle:
+                return None
+            resp = (
+                youtube.channels()
+                .list(part=CHANNEL_PARTS, forHandle=handle, maxResults=1)
+                .execute()
+            )
+            if not resp.get("items"):
+                # Fallback to search if handle lookup fails (edge cases)
+                search = (
+                    youtube.search()
+                    .list(part="snippet", q=handle, type="channel", maxResults=1)
+                    .execute()
+                )
+                items = search.get("items", [])
+                if not items:
+                    return None
+                channel_id = items[0]["snippet"].get("channelId")
+                if not channel_id:
+                    return None
+                resp = (
+                    youtube.channels()
+                    .list(part=CHANNEL_PARTS, id=channel_id, maxResults=1)
+                    .execute()
+                )
+
         items = resp.get("items", [])
-        if items:
-            return items[0]["snippet"]["channelId"]
-    except Exception as e:
-        LOGGER.warning(f"⚠️ Failed to resolve handle {handle}: {e}")
-    return None
+        return items[0] if items else None
+    except Exception as exc:
+        LOGGER.warning(f"⚠️ fetch_channel_item failed for {identifier}: {exc}")
+        return None
+
+
+def resolve_handle_to_id(youtube, handle: str) -> Optional[str]:
+    """Resolve @handle to channel ID using YouTube API."""
+    item = fetch_channel_item(youtube, handle)
+    return item.get("id") if item else None
 
 
 # ============================================================================
@@ -356,18 +448,69 @@ async def scrape_about_page(
         # Try navigating with retry logic
         for attempt in range(3):
             try:
-                await page.goto(url, wait_until="networkidle", timeout=60000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=90000)
+                
+                # Give YouTube's JavaScript a moment to render
+                await asyncio.sleep(3)
+                
+                # Check if channel has been removed/taken down
+                # YouTube shows yt-alert-renderer for removed/suspended channels
+                channel_removed = False
+                alert = await page.query_selector("yt-alert-renderer")
+                if alert:
+                    try:
+                        error_text = await alert.inner_text()
+                        LOGGER.warning(f"⛔ Channel {identifier} unavailable: {error_text.strip()[:100]}")
+                        channel_removed = True
+                    except Exception:
+                        pass
+                
+                # Exit early if channel was removed
+                if channel_removed:
+                    return about_links, subscriptions
+                
+                # Wait for About page specific content to appear
+                # Try multiple possible selectors
+                page_loaded = False
+                for selector in ["ytd-channel-about-metadata-renderer", "#description-container", "ytd-about-channel-renderer", "#page-header"]:
+                    try:
+                        element = await page.query_selector(selector)
+                        if element:
+                            page_loaded = True
+                            break
+                    except Exception:
+                        continue
+                
+                if not page_loaded:
+                    # Debug: save page HTML to see what's actually there
+                    try:
+                        html_content = await page.content()
+                        debug_file = f"/tmp/debug_{identifier}_attempt{attempt+1}.html"
+                        with open(debug_file, "w", encoding="utf-8") as f:
+                            f.write(html_content)
+                        # Print first 2000 chars to log
+                        LOGGER.warning(f"⚠️ About page content not loaded for {identifier} (attempt {attempt+1}/3)")
+                        LOGGER.warning(f"📄 Debug HTML saved to: {debug_file}")
+                        LOGGER.warning(f"📄 Page start:\n{html_content[:2000]}")
+                    except Exception as e:
+                        LOGGER.warning(f"⚠️ Could not save debug HTML: {e}")
+                    
+                    if attempt == 2:
+                        # Last attempt failed, return empty results
+                        return about_links, subscriptions
+                    await asyncio.sleep(3)
+                    continue
+                
+                # Give extra time for dynamic content
                 await humanize_page(page)
-                try:
-                    await page.wait_for_selector("#contents", state="attached", timeout=15000)
-                    await asyncio.sleep(2)  # Allow JS to paint text
-                except Exception as e:
-                    LOGGER.warning(f"⚠️ Wait for #contents failed on {identifier}: {e}")
+                await asyncio.sleep(2)
                 break
+                
             except Exception as e:
+                LOGGER.warning(f"⚠️ Navigation error for {identifier} (attempt {attempt+1}/3): {e}")
                 if attempt == 2:
                     return about_links, subscriptions
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
 
         # Scrape external links
         anchors = await page.query_selector_all("#link-list-container a")
@@ -420,13 +563,16 @@ async def humanize_page(page: Page, min_wait: float = 0.5, max_wait: float = 2.0
     await asyncio.sleep(random.uniform(min_wait, max_wait))
 
     # Gentle scrolls
-    height = await page.evaluate("() => document.body.scrollHeight")
-    for y in range(0, height, random.randint(250, 800)):
-        try:
-            await page.evaluate(f"window.scrollTo(0, {y})")
-            await asyncio.sleep(random.uniform(0.1, 0.6))
-        except Exception:
-            break
+    try:
+        height = await page.evaluate("() => document.body.scrollHeight")
+        for y in range(0, height, random.randint(250, 800)):
+            try:
+                await page.evaluate(f"window.scrollTo(0, {y})")
+                await asyncio.sleep(random.uniform(0.1, 0.6))
+            except Exception:
+                break
+    except Exception:
+        pass  # Page not ready for scrolling yet
 
     # Small mouse movement
     try:
@@ -643,7 +789,9 @@ def _init_channel_doc(
     cid: str,
     channel_item: Optional[dict],
     screenshot_uri: Optional[str],
-    scraped_only: bool = False
+    scraped_only: bool = False,
+    is_bot: bool = True,
+    bot_check_type: str = "propagated"
 ) -> None:
     """Initialize a channel Firestore document with metadata and metrics.
     
@@ -653,6 +801,8 @@ def _init_channel_doc(
         channel_item: YouTube API channel response item (or None)
         screenshot_uri: gs:// URI of screenshot (or None)
         scraped_only: If True, store skeleton doc with is_metadata_missing=True
+        is_bot: Bot status (True=confirmed bot, False=pending review)
+        bot_check_type: How bot status was determined (e.g., "propagated", "pending_review", "manual")
     """
     doc_ref = db.collection("channel").document(cid)
     if doc_ref.get().exists:
@@ -684,9 +834,9 @@ def _init_channel_doc(
         "channel_id": cid,
         "registered_at": datetime.now(),
         "last_checked_at": datetime.now(),
-        "is_bot": True,
-        "is_bot_check_type": "propagated",
-        "is_bot_checked": True,
+        "is_bot": is_bot,
+        "is_bot_check_type": bot_check_type,
+        "is_bot_checked": is_bot,  # Only mark as checked if is_bot is True
         "is_screenshot_stored": bool(screenshot_uri),
         "screenshot_gcs_uri": screenshot_uri,
         "avatar_url": avatar_url,
@@ -703,7 +853,273 @@ def _init_channel_doc(
 # Bot Graph Expansion
 # ============================================================================
 
-async def expand_bot_graph_async(seed_channels: List[str]) -> None:
+# ═══════════════════════════════════════════════════════════════════
+# Bot Graph Expansion - Refactored for Clarity
+# ═══════════════════════════════════════════════════════════════════
+
+async def _process_channel_with_api(
+    youtube, 
+    context: PlaywrightContext, 
+    identifier: str, 
+    batch,
+    seen: set,
+    queue: list,
+    is_bot: bool = True,
+    bot_check_type: str = "propagated"
+) -> list[str]:
+    """Process a channel using YouTube API.
+    
+    Args:
+        is_bot: Bot status for this channel
+        bot_check_type: How bot status was determined
+        
+    Returns:
+        List of subscription channel IDs/handles
+    """
+    # Fetch channel metadata via API
+    channel_item = fetch_channel_item(youtube, identifier)
+    if not channel_item:
+        LOGGER.warning(f"⚠️ No channel data for {identifier}")
+        return []
+
+    channel_id = channel_item.get("id", identifier)
+    if channel_id not in seen:
+        seen.add(channel_id)
+    if channel_id != identifier:
+        LOGGER.info(f"🔁 Resolved {identifier} → {channel_id}")
+    identifier = channel_id
+
+    write_json_to_gcs(GCS_BUCKET_DATA, channel_metadata_raw_path(identifier), channel_item)
+
+    # Capture screenshot
+    screenshot_uri = await capture_home_screenshot(context, identifier)
+    
+    # Initialize channel doc or pending doc
+    if identifier.startswith("UC"):
+        _init_channel_doc(batch, identifier, channel_item, screenshot_uri, 
+                         scraped_only=False, is_bot=is_bot, bot_check_type=bot_check_type)
+    else:
+        db.collection("channel_pending").document(identifier).set({
+            "handle": identifier,
+            "screenshot_gcs_uri": screenshot_uri,
+            "is_metadata_missing": True,
+            "is_bot": is_bot,
+            "is_bot_check_type": bot_check_type,
+            "discovered_at": datetime.now(),
+            "last_checked_at": datetime.now(),
+        }, merge=True)
+    
+    # Fetch channel sections
+    sec = (
+        youtube.channelSections()
+    .list(part="snippet,contentDetails", channelId=identifier)
+        .execute()
+    )
+    write_json_to_gcs(GCS_BUCKET_DATA, channel_sections_raw_path(identifier), sec)
+
+    # Scrape about page
+    about_links, subs = await scrape_about_page(context, identifier)
+    if about_links:
+        store_channel_domains(identifier, about_links)
+        LOGGER.info(f"🔗 Stored {len(about_links)} About links for {identifier}")
+
+    # Process featured channels from API
+    for item in sec.get("items", []):
+        if item.get("snippet", {}).get("type") == "multiplechannels":
+            for featured in item.get("contentDetails", {}).get("channels", []):
+                if featured not in seen:
+                    seen.add(featured)
+                    queue.append(featured)
+                    LOGGER.info(f"➕ Queued featured channel {featured}")
+                    db.collection("channel_links").add({
+                        "from_channel_id": identifier,
+                        "to_channel_id": featured,
+                        "discovered_at": datetime.now(),
+                        "source": "channelSections",
+                    })
+    
+    return subs
+
+
+async def _process_channel_without_api(
+    context: PlaywrightContext,
+    identifier: str,
+    batch,
+    seen: set,
+    queue: list,
+    is_bot: bool = True,
+    bot_check_type: str = "propagated"
+) -> list[str]:
+    """Process a channel without YouTube API (scraping only).
+    
+    Args:
+        is_bot: Bot status for this channel
+        bot_check_type: How bot status was determined
+        
+    Returns:
+        List of subscription channel IDs/handles
+    """
+    # Capture screenshot
+    screenshot_uri = await capture_home_screenshot(context, identifier)
+
+    # Scrape avatar
+    avatar_url = await scrape_avatar_url(context, identifier)
+    avatar_gcs_uri = download_and_store_avatar(identifier, avatar_url) if avatar_url else None
+
+    # Scrape banner
+    banner_url = await scrape_banner_url(context, identifier)
+    banner_gcs_uri = download_and_store_banner(identifier, banner_url) if banner_url else None
+
+    # Store channel or pending doc
+    if identifier.startswith("UC"):
+        data = {
+            "channel_id": identifier,
+            "registered_at": datetime.now(),
+            "last_checked_at": datetime.now(),
+            "is_bot": is_bot,
+            "is_bot_check_type": bot_check_type,
+            "is_bot_checked": is_bot,
+            "is_screenshot_stored": bool(screenshot_uri),
+            "screenshot_gcs_uri": screenshot_uri,
+            "avatar_url": avatar_url,
+            "avatar_gcs_uri": avatar_gcs_uri,
+            "banner_url": banner_url,
+            "banner_gcs_uri": banner_gcs_uri,
+            "is_metadata_missing": True,
+        }
+        batch.set(db.collection("channel").document(identifier), data)
+    else:
+        db.collection("channel_pending").document(identifier).set({
+            "handle": identifier,
+            "screenshot_gcs_uri": screenshot_uri,
+            "avatar_url": avatar_url,
+            "avatar_gcs_uri": avatar_gcs_uri,
+            "banner_url": banner_url,
+            "banner_gcs_uri": banner_gcs_uri,
+            "is_bot": is_bot,
+            "is_bot_check_type": bot_check_type,
+            "is_metadata_missing": True,
+            "discovered_at": datetime.now(),
+            "last_checked_at": datetime.now(),
+        }, merge=True)
+
+    # Scrape featured channels
+    featured = await scrape_featured_channels(context, identifier)
+    for f in featured:
+        if f.startswith("UC"):
+            # Real channel ID
+            if f not in seen:
+                seen.add(f)
+                queue.append(f)
+                LOGGER.info(f"➕ Queued (scraped) featured channel {f}")
+                db.collection("channel_links").add({
+                    "from_channel_id": identifier,
+                    "to_channel_id": f,
+                    "discovered_at": datetime.now(),
+                    "source": "featured_scrape",
+                    "needs_resolution": False,
+                })
+                fb = db.batch()
+                _init_channel_doc(fb, f, None, None, scraped_only=True, 
+                                is_bot=is_bot, bot_check_type=bot_check_type)
+                fb.commit()
+        else:
+            # Handle - needs resolution
+            if f not in seen:
+                seen.add(f)
+                queue.append(f)
+            LOGGER.info(f"➕ Queued (scraped) handle {f} (needs API resolution)")
+            db.collection("channel_links").add({
+                "from_channel_id": identifier,
+                "to_channel_handle": f,
+                "discovered_at": datetime.now(),
+                "source": "featured_scrape",
+                "needs_resolution": True,
+            })
+            db.collection("channel_pending").document(f).set({
+                "handle": f,
+                "discovered_at": datetime.now(),
+                "source": "featured_scrape",
+                "needs_resolution": True,
+            })
+
+    # Scrape about page
+    about_links, subs = await scrape_about_page(context, identifier)
+    if about_links:
+        store_channel_domains(identifier, about_links)
+        LOGGER.info(f"🔗 Stored {len(about_links)} About links for {identifier}")
+    
+    return subs
+
+
+def _process_subscriptions(
+    subs: list[str],
+    identifier: str,
+    youtube,
+    seen: set,
+    queue: list,
+    use_api: bool,
+    is_bot: bool = True,
+    bot_check_type: str = "propagated"
+) -> None:
+    """Process subscription channels and add to queue.
+    
+    Args:
+        subs: List of channel IDs or handles from subscriptions
+        identifier: Parent channel ID or handle
+        youtube: YouTube API client (or None if not using API)
+        seen: Set of already-processed channel identifiers
+        queue: Queue of channels to process
+        use_api: Whether to use YouTube API for handle resolution
+        is_bot: Bot status to assign to discovered channels
+        bot_check_type: How bot status was determined
+    """
+    for sub in subs:
+        if sub.startswith("UC"):
+            sub_id = sub
+        else:
+            if use_api:
+                sub_id = resolve_handle_to_id(youtube, sub) or sub
+            else:
+                # Handle without API - enqueue for recursive processing
+                if sub not in seen:
+                    seen.add(sub)
+                    queue.append(sub)
+                db.collection("channel_links").add({
+                    "from_channel_id": identifier,
+                    "to_channel_handle": sub,
+                    "discovered_at": datetime.now(),
+                    "source": "subscriptions",
+                    "needs_resolution": True,
+                })
+                db.collection("channel_pending").document(sub).set({
+                    "handle": sub,
+                    "discovered_at": datetime.now(),
+                    "source": "subscriptions",
+                    "needs_resolution": True,
+                })
+                continue
+
+        # Only enqueue if we have a usable UC ID
+        if sub_id not in seen and sub_id.startswith("UC"):
+            seen.add(sub_id)
+            queue.append(sub_id)
+            LOGGER.info(f"➕ Queued subscription channel {sub_id}")
+            db.collection("channel_links").add({
+                "from_channel_id": identifier,
+                "to_channel_id": sub_id,
+                "discovered_at": datetime.now(),
+                "source": "subscriptions",
+                "needs_resolution": False,
+            })
+
+
+async def expand_bot_graph_async(
+    seed_channels: List[str],
+    use_api: bool = False,
+    is_bot: bool = True,
+    bot_check_type: str = "propagated",
+) -> None:
     """Expand the bot graph by recursively discovering channels.
     
     Starting from seed channels, recursively discovers and processes:
@@ -715,13 +1131,16 @@ async def expand_bot_graph_async(seed_channels: List[str]) -> None:
     Stores all data to Firestore and GCS.
     
     Args:
-        seed_channels: Initial list of channel IDs to start expansion from
+        seed_channels: Initial list of channel IDs or handles to start expansion from
+        use_api: Whether to fetch channel metadata via the YouTube API (True) or rely on scraping only (False)
+        is_bot: Bot status for discovered channels (True=confirmed, False=pending review)
+        bot_check_type: How bot status was determined (e.g., "propagated", "pending_review", "manual")
     """
     if not seed_channels:
         LOGGER.info("No seed channels passed")
         return
     
-    youtube = get_youtube()
+    youtube = get_youtube() if use_api else None
     seen, queue = set(seed_channels), list(seed_channels)
 
     LOGGER.info(f"🚀 Starting expansion with {len(queue)} seeds")
@@ -729,218 +1148,30 @@ async def expand_bot_graph_async(seed_channels: List[str]) -> None:
     async with PlaywrightContext() as context:
         while queue:
             identifier = queue.pop(0)
+            
             try:
-                subs: list[str] = []  # <-- always initialize here
                 batch = db.batch()
-                if USE_API:
-                    resp = (
-                        youtube.channels()
-                        .list(
-                            part="id,snippet,statistics,brandingSettings,topicDetails,status,contentDetails",
-                            id=identifier,
-                            maxResults=1,
-                        )
-                        .execute()
-                    )
-                    if not resp.get("items"):
-                        LOGGER.warning(f"⚠️ No channel data for {identifier}")
-                        continue
-                    channel_item = resp["items"][0]
-                    write_json_to_gcs(GCS_BUCKET_DATA, channel_metadata_raw_path(identifier), channel_item)
-
-                    screenshot_uri = await capture_home_screenshot(context, identifier)
-                    
-                    if identifier.startswith("UC"):
-                        _init_channel_doc(batch, identifier, channel_item, screenshot_uri, scraped_only=not USE_API)
-                    else:
-                        # Store handle in pending, but still capture screenshot + timestamp
-                        db.collection("channel_pending").document(identifier).set({
-                            "handle": identifier,
-                            "screenshot_gcs_uri": screenshot_uri,
-                            "is_metadata_missing": True,
-                            "discovered_at": datetime.now(),
-                            "last_checked_at": datetime.now(),
-                        }, merge=True)
+                subs: list[str] = []
                 
-                    sec = (
-                        youtube.channelSections()
-                        .list(part="snippet,contentDetails", channelId=identifier)
-                        .execute()
+                # Process channel with or without API
+                if use_api:
+                    subs = await _process_channel_with_api(
+                        youtube, context, identifier, batch, seen, queue,
+                        is_bot=is_bot, bot_check_type=bot_check_type
                     )
-                    write_json_to_gcs(GCS_BUCKET_DATA, channel_sections_raw_path(identifier), sec)
-
-                    about_links, subs = await scrape_about_page(context, identifier)
-                    if about_links:
-                        store_channel_domains(identifier, about_links)
-                        LOGGER.info(f"🔗 Stored {len(about_links)} About links for {identifier}")
-
-                    for item in sec.get("items", []):
-                        if item.get("snippet", {}).get("type") == "multiplechannels":
-                            for featured in item.get("contentDetails", {}).get("channels", []):
-                                if featured not in seen:
-                                    seen.add(featured)
-                                    queue.append(featured)
-                                    LOGGER.info(f"➕ Queued featured channel {featured}")
-                                    db.collection("channel_links").add({
-                                        "from_channel_id": identifier,
-                                        "to_channel_id": featured,
-                                        "discovered_at": datetime.now(),
-                                        "source": "channelSections",
-                                    })
-
                 else:
-                    # Always capture a screenshot of the current channel (UC or handle)
-                    screenshot_uri = await capture_home_screenshot(context, identifier)
-
-                    # Try scraping avatar
-                    avatar_url = await scrape_avatar_url(context, identifier)
-                    avatar_gcs_uri = None
-                    if avatar_url:
-                        avatar_gcs_uri = download_and_store_avatar(identifier, avatar_url)
-
-                    # Try scraping banner
-                    banner_url = await scrape_banner_url(context, identifier)
-                    banner_gcs_uri = None
-                    if banner_url:
-                        banner_gcs_uri = download_and_store_banner(identifier, banner_url)
-
-                    if identifier.startswith("UC"):
-                        # Store skeleton doc since no API metadata
-                        data = {
-                            "channel_id": identifier,
-                            "registered_at": datetime.now(),
-                            "last_checked_at": datetime.now(),
-                            "is_bot": True,
-                            "is_bot_check_type": "propagated",
-                            "is_bot_checked": True,
-                            "is_screenshot_stored": bool(screenshot_uri),
-                            "screenshot_gcs_uri": screenshot_uri,
-                            "avatar_url": avatar_url,
-                            "avatar_gcs_uri": avatar_gcs_uri,
-                            "banner_url": banner_url,
-                            "banner_gcs_uri": banner_gcs_uri,
-                            "is_metadata_missing": True,
-                        }
-
-                        batch.set(db.collection("channel").document(identifier), data)
-                    else:
-                        # Store pending doc for handle, but still record screenshot + avatar
-                        db.collection("channel_pending").document(identifier).set({
-                            "handle": identifier,
-                            "screenshot_gcs_uri": screenshot_uri,
-                            "avatar_url": avatar_url,
-                            "avatar_gcs_uri": avatar_gcs_uri,
-                            "banner_url": banner_url,
-                            "banner_gcs_uri": banner_gcs_uri,
-                            "is_metadata_missing": True,
-                            "discovered_at": datetime.now(),
-                            "last_checked_at": datetime.now(),
-                        }, merge=True)
-
-                    if identifier.startswith("UC"):
-                        # Store skeleton doc since no API metadata
-                        _init_channel_doc(batch, identifier, None, screenshot_uri, scraped_only=True)
-                    else:
-                        # Store pending doc for handle, but still record screenshot
-                        db.collection("channel_pending").document(identifier).set({
-                            "handle": identifier,
-                            "screenshot_gcs_uri": screenshot_uri,
-                            "is_metadata_missing": True,
-                            "discovered_at": datetime.now(),
-                            "last_checked_at": datetime.now(),
-                        }, merge=True)
-
-                    featured = await scrape_featured_channels(context, identifier)
-                    for f in featured:
-                        if f.startswith("UC"):  
-                            # We have a real channel ID
-                            f_id = f
-                            if f_id not in seen:
-                                seen.add(f_id)
-                                queue.append(f_id)
-                                LOGGER.info(f"➕ Queued (scraped) featured channel {f_id}")
-                                db.collection("channel_links").add({
-                                    "from_channel_id": identifier,
-                                    "to_channel_id": f_id,
-                                    "discovered_at": datetime.now(),
-                                    "source": "featured_scrape",
-                                    "needs_resolution": False,
-                                })
-                                fb = db.batch()
-                                _init_channel_doc(fb, f_id, None, None, scraped_only=True)
-                                fb.commit()
-                        else:
-                            # enqueue handle for recursive scrape
-                            handle = f
-                            if handle not in seen:
-                                seen.add(handle)
-                                queue.append(handle)
-                            LOGGER.info(f"➕ Queued (scraped) handle {handle} (needs API resolution)")
-                            db.collection("channel_links").add({
-                                "from_channel_id": identifier,
-                                "to_channel_handle": handle,
-                                "discovered_at": datetime.now(),
-                                "source": "featured_scrape",
-                                "needs_resolution": True,
-                            })
-                            db.collection("channel_pending").document(handle).set({
-                                "handle": handle,
-                                "discovered_at": datetime.now(),
-                                "source": "featured_scrape",
-                                "needs_resolution": True,
-                            })
-
-
-                    # also scrape About page in fallback mode
-                    about_links, subs = await scrape_about_page(context, identifier)
-                    if about_links:
-                        store_channel_domains(identifier, about_links)
-                        LOGGER.info(f"🔗 Stored {len(about_links)} About links for {identifier}")
-
-                # enqueue subscriptions (always runs, with subs defined)
-                for sub in subs:
-                    if sub.startswith("UC"):
-                        sub_id = sub
-                    else:
-                        if USE_API:
-                            sub_id = resolve_handle_to_id(youtube, sub) or sub
-                        else:
-                            handle = sub
-                            if handle not in seen:
-                                seen.add(handle)
-                                queue.append(handle)  # 👈 enqueue handle for recursion
-                            db.collection("channel_links").add({
-                                "from_channel_id": identifier,
-                                "to_channel_handle": handle,
-                                "discovered_at": datetime.now(),
-                                "source": "subscriptions",
-                                "needs_resolution": True,
-                            })
-                            db.collection("channel_pending").document(handle).set({
-                                "handle": handle,
-                                "discovered_at": datetime.now(),
-                                "source": "subscriptions",
-                                "needs_resolution": True,
-                            })
-                            continue   # no UC ID yet, but recursion continues with handle
-
-
-                    # only enqueue if we have a usable UC ID
-                    if sub_id not in seen and sub_id.startswith("UC"):
-                        seen.add(sub_id)
-                        queue.append(sub_id)
-                        LOGGER.info(f"➕ Queued subscription channel {sub_id}")
-                        db.collection("channel_links").add({
-                            "from_channel_id": identifier,
-                            "to_channel_id": sub_id,
-                            "discovered_at": datetime.now(),
-                            "source": "subscriptions",
-                            "needs_resolution": False,
-                        })
-
+                    subs = await _process_channel_without_api(
+                        context, identifier, batch, seen, queue,
+                        is_bot=is_bot, bot_check_type=bot_check_type
+                    )
+                
+                # Process subscriptions from about page
+                _process_subscriptions(subs, identifier, youtube, seen, queue, use_api,
+                                     is_bot=is_bot, bot_check_type=bot_check_type)
+                
+                # Commit batch
                 batch.commit()
-
-
+                
             except HttpError as e:
                 LOGGER.error(f"❌ API error for {identifier}: {e}")
             except Exception as e:
@@ -954,7 +1185,13 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Expand bot graph recursively")
-    parser.add_argument("seed_channels", nargs="*", help="Seed channel IDs")
+    parser.add_argument("seed_channels", nargs="*", help="Seed channel IDs or handles")
+    parser.add_argument(
+        "--use-api",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use the YouTube Data API for channel metadata (default: scrape only)",
+    )
     args = parser.parse_args()
 
     if not args.seed_channels:
@@ -977,4 +1214,4 @@ if __name__ == "__main__":
     else:
         seeds = args.seed_channels
 
-    asyncio.run(expand_bot_graph_async(seeds))
+    asyncio.run(expand_bot_graph_async(seeds, use_api=args.use_api))

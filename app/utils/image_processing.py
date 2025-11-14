@@ -1,8 +1,45 @@
 import re, cv2, numpy as np, requests, joblib, os
-from app.analysis.inference.classifier_utils import score_with_pca_kmeans
+from pathlib import Path
 
+__all__ = [
+    # Main public API
+    "classify_avatar_url",
+    "upgrade_avatar_url",
+    "download_avatar",
+    # Model loading
+    "get_xgb_model",
+    "get_pca_kmeans_model",
+    "is_mobilenet_available",
+    "score_with_pca_kmeans",
+    # Image analysis features (for advanced users)
+    "edge_density",
+    "dominant_color_fraction",
+    "white_fraction",
+    "color_entropy",
+    "saturation_stats",
+    "brightness_mean",
+    "color_variance",
+    "symmetry_score",
+    "skin_tone_fraction",
+    "hough_lines_density",
+    "is_suspicious_avatar",
+]
+
+# ───── Model Loading ─────
 _MODEL = None
-def get_xgb_model(model_path="xgb_bot_model.pkl"):
+_PCA_KMEANS_MODEL = None
+_MOBILENET_AVAILABLE = None
+
+
+def is_mobilenet_available() -> bool:
+    """Check if MobileNet model is available."""
+    global _MOBILENET_AVAILABLE
+    if _MOBILENET_AVAILABLE is None:
+        model_path = Path("models/avatar/mobilenet_v2_best.pth")
+        _MOBILENET_AVAILABLE = model_path.exists()
+    return _MOBILENET_AVAILABLE
+
+def get_xgb_model(model_path="models/xgb_bot_model.pkl"):
     global _MODEL
     if _MODEL is None:
         if os.path.exists(model_path):
@@ -11,6 +48,43 @@ def get_xgb_model(model_path="xgb_bot_model.pkl"):
             print(f"⚠️ No model found at {model_path}, skipping probability scoring")
             _MODEL = None
     return _MODEL
+
+
+def get_pca_kmeans_model(path="models/clustering/kmeans_pca_bot_model.pkl"):
+    """Load PCA+KMeans model for bot classification."""
+    global _PCA_KMEANS_MODEL
+    if _PCA_KMEANS_MODEL is None:
+        try:
+            _PCA_KMEANS_MODEL = joblib.load(path)
+        except FileNotFoundError:
+            print(f"⚠️ No PCA+KMeans model found at {path}")
+            _PCA_KMEANS_MODEL = None
+    return _PCA_KMEANS_MODEL
+
+
+def score_with_pca_kmeans(metrics: dict) -> dict:
+    """Score avatar metrics using PCA+KMeans clustering model."""
+    model_bundle = get_pca_kmeans_model()
+    if model_bundle is None:
+        metrics["bot_probability"] = 0.0
+        metrics["has_bot_probability"] = False
+        return metrics
+
+    pca = model_bundle["pca"]
+    kmeans = model_bundle["kmeans"]
+    features = model_bundle["features"]
+    cluster_bot_prob = model_bundle["cluster_bot_prob"]
+
+    # Extract metrics → PCA → KMeans
+    X = np.array([[metrics[f] for f in features]])
+    X_pca = pca.transform(X)
+    cluster = int(kmeans.predict(X_pca)[0])
+    prob = float(cluster_bot_prob.get(cluster, 0.0))
+
+    metrics["bot_probability"] = prob
+    metrics["cluster"] = cluster
+    metrics["has_bot_probability"] = True
+    return metrics
 
 
 # ───── Download Helpers ─────
@@ -68,6 +142,11 @@ def _color_entropy(img: np.ndarray, bins: int = 16) -> float:
     hist = hist.ravel() / hist.sum()
     hist = hist[hist > 0]
     return float(-(hist * np.log2(hist)).sum())
+
+
+def color_entropy(img: np.ndarray, bins: int = 16) -> float:
+    """Public helper for color entropy metric."""
+    return _color_entropy(img, bins=bins)
 
 
 def saturation_stats(img: np.ndarray) -> tuple[float,float]:
@@ -138,8 +217,8 @@ def is_suspicious_avatar(img, dbg=False):
 
 
 # ───── Classifier + Metrics Dump ─────
-def classify_avatar_url(url: str, size: int = 256, model=None):
-    
+def _classify_avatar_url_traditional(url: str, size: int = 256, model=None) -> tuple[str, dict]:
+    """Original classification method using image metrics and heuristics."""
     hi = upgrade_avatar_url(url, size=size)
     img = download_avatar(hi)
     if img is None:
@@ -191,7 +270,34 @@ def classify_avatar_url(url: str, size: int = 256, model=None):
     return label, metrics
 
 
-
+def classify_avatar_url(url: str, size: int = 256, model=None, use_mobilenet: bool = True) -> tuple[str, dict]:
+    """Classify avatar from URL using either MobileNet (preferred) or traditional metrics.
+    
+    Args:
+        url: Avatar image URL
+        size: Image size to download
+        model: XGBoost model (for traditional method)
+        use_mobilenet: Whether to use MobileNet if available (default True)
+        
+    Returns:
+        Tuple of (label, metrics_dict)
+        
+    Note:
+        - If use_mobilenet=True and model is available, uses MobileNet (best accuracy)
+        - Otherwise falls back to traditional metric-based classification
+        - Labels: "BOT", "HUMAN", "DEFAULT", "SUSPICIOUS", "CUSTOM", "MISSING"
+    """
+    # Try MobileNet first if requested and available
+    if use_mobilenet and is_mobilenet_available():
+        try:
+            from app.utils.mobilenet_classifier import classify_avatar_mobilenet
+            label, bot_prob, metrics = classify_avatar_mobilenet(url)
+            return label, metrics
+        except Exception as e:
+            print(f"⚠️ MobileNet classification failed ({e}), falling back to traditional method")
+    
+    # Fallback to traditional metric-based classification
+    return _classify_avatar_url_traditional(url, size, model)
 
 
 if __name__ == "__main__":

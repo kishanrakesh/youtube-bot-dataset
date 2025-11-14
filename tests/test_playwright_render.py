@@ -15,8 +15,8 @@ async def main():
             ],
         )
         page = await browser.new_page()
-        await page.goto("https://www.youtube.com/channel/UCfELkWGi_zyokp6VJVL6aXg", wait_until="networkidle")
-        await page.wait_for_selector("#contents", timeout=15000)
+        await page.goto(url, timeout=60000)
+        await page.wait_for_selector("#contents", state="visible", timeout=20000)
         text = await page.inner_text("body")
         print("Visible text snippet:", text)
         await page.screenshot(path="/tmp/yt_test.png", full_page=True)

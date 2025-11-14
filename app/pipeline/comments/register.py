@@ -13,12 +13,17 @@ import argparse
 import asyncio
 import logging
 import os
+import warnings
 from dotenv import load_dotenv
 
 from app.pipeline.comments.register_channels import register_commenter_channels
 from app.utils.gcs_utils import list_gcs_files
 
 load_dotenv()
+
+# Suppress torch NNPACK warnings
+warnings.filterwarnings('ignore', message='Could not initialize NNPACK')
+os.environ['OMP_NUM_THREADS'] = '1'
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -82,6 +87,12 @@ if __name__ == "__main__":
         help="Resume using manifest (default if neither force/resume given)"
     )
     parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable debug logging and save page content on errors"
+    )
+    parser.add_argument(
         "--concurrency",
         type=int,
         default=int(os.getenv("REGISTER_COMMENTERS_CONCURRENCY", "8")),
@@ -107,6 +118,13 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
+    
+    # Enable debug logging if requested
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("app.pipeline.channels.scraping").setLevel(logging.DEBUG)
+        LOGGER.info("🔍 Debug logging enabled")
+    
     main(
         limit=args.limit,
         force=args.force,
