@@ -28,30 +28,46 @@ tmp/
 *.out
 
 # ───── Model & data artifacts ─────
+# Models directory (large trained models)
+models/**/*.pkl
+models/**/*.pth
+models/**/*.h5
+models/**/*.joblib
 *.pkl
-*.joblib
-*.h5
+*.pth
+
+# Data directory (large datasets)
+data/raw/**
+data/datasets/*.zip
+data/datasets/avatar_images/**
+data/processed/*.csv
+
+# Generic data files in root (backup)
 *.csv
-*.json
 *.npy
 *.npz
 *.gz
 *.zip
 
-# If you want to *keep* code JSONs (e.g., sample manifests), allowlist:
-# !app/**/*.json
+# Keep important JSON configs but ignore data JSONs
+*.json
+# Allow code JSONs (configs, manifests, etc.)
+!app/**/*.json
+!.vscode/*.json
+!config/*.json
+# But still ignore secrets
+config/service-account.json
 
-# ───── Raw data & intermediate folders ─────
+# ───── Old/deprecated folders ─────
 raw/
-screenshots/
-test/
-ranked_channels_*.csv
-channels_*.csv
-bot_metrics.csv
-metric_thresholds.csv
+/screenshots/
+logs/
+env.old/
 
 # ───── Secrets & Credentials ─────
+config/service-account.json
 service-account.json
+.env
 *.key
 *.pem
 *.crt
@@ -87,8 +103,7 @@ node_modules/
 build/
 dist/
 
-# ───── Local runtime scripts ─────
-run_nightly.sh
+# ───── Local runtime/debug files ─────
 tree.txt
 ranked_channels_overfit.csv
 
@@ -99,4 +114,4 @@ app/pipeline/__pycache__/
 app/screenshots/__pycache__/
 
 # ───── Optional: ignore local test folders ─────
-test/
+# (using tests/ not test/)

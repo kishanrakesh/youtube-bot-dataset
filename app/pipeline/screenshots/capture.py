@@ -117,6 +117,7 @@ async def save_screenshots(doc_snaps: List[firestore.DocumentSnapshot], parallel
                     snap.reference.update({
                         "screenshot_gcs_uri": gcs_uri,
                         "is_screenshot_stored": True,
+                        "is_bot_checked": False,  # Initialize for review
                         "screenshot_stored_at": datetime.utcnow(),
                         "last_checked_at": datetime.utcnow()
                     })
