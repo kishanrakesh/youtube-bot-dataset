@@ -323,79 +323,54 @@ def resolve_handle_to_id(youtube, handle: str) -> Optional[str]:
         LOGGER.warning(f"⚠️ Failed to resolve handle {handle}: {e}")
     return None
 
-# async def on_console(msg):
-#     try:
-#         LOGGER.info(f"🧩 Console: [{msg.type}] {msg.text}")
-#     except Exception as e:
-#         LOGGER.warning(f"⚠️ Console log error: {e}")
 
-# async def on_page_error(err):
-#     LOGGER.error(f"💥 Page error: {err}")
+# ============================================================================
+# Page Scraping Functions
+# ============================================================================
 
-# async def on_response(resp):
-#     LOGGER.info(f"🌐 Response {resp.status} → {resp.url[:100]}")
-
-# async def on_request_failed(req):
-#     LOGGER.warning(f"🚫 Request failed: {req.url}")
-
-
-# ───── About page scrape (links + subscriptions) ─────
-async def scrape_about_page(context: PlaywrightContext, identifier: str, sub_limit: int = 50):
+async def scrape_about_page(
+    context: PlaywrightContext,
+    identifier: str,
+    sub_limit: int = 50
+) -> Tuple[List[str], List[str]]:
+    """Scrape external links and subscriptions from channel About page.
+    
+    Args:
+        context: Active PlaywrightContext
+        identifier: Channel ID or handle
+        sub_limit: Maximum number of subscriptions to scrape
+        
+    Returns:
+        Tuple of (about_links, subscriptions) where:
+            - about_links: List of external URLs from the links section
+            - subscriptions: List of channel IDs/handles from subscribed channels
+    """
     url = get_channel_url(identifier, "/about")
     about_links, subscriptions = [], []
     page = None
 
     try:
-        # --- open page safely ---
+        # Open page safely
         page = await context.new_page()
-        # page.on("console", on_console)
-        # page.on("pageerror", on_page_error)
-        # page.on("response", on_response)
-        # page.on("requestfailed", on_request_failed)
 
-
-        # LOGGER.info(f"🟢 Opened new page for {identifier}")
-
-        # --- try navigating with retry logic ---
+        # Try navigating with retry logic
         for attempt in range(3):
-            # LOGGER.info(f"🟢 In attempt {attempt}")
             try:
                 await page.goto(url, wait_until="networkidle", timeout=60000)
                 await humanize_page(page)
                 try:
                     await page.wait_for_selector("#contents", state="attached", timeout=15000)
-                    await asyncio.sleep(2)  # allow JS to paint text
+                    await asyncio.sleep(2)  # Allow JS to paint text
                 except Exception as e:
                     LOGGER.warning(f"⚠️ Wait for #contents failed on {identifier}: {e}")
-
-                # LOGGER.info(f"🟢 Did page.goto {identifier}")
                 break
             except Exception as e:
-                # LOGGER.info(f"🟢 In Exception {identifier}")
                 if attempt == 2:
-                    # LOGGER.warning(f"❌ Failed to load {url} after 3 attempts: {e}")
                     return about_links, subscriptions
                 await asyncio.sleep(2)
 
-        # --- scrape external links ---
-        # LOGGER.info(f"📍 Final URL: {page.url}")
-        # html = await page.content()
-        # LOGGER.info(f"📄 Page loaded for {identifier} (length={len(html)} chars)")
-
-        # Log first few hundred characters for sanity check
-        # snippet = html[:5000].replace("\n", " ").replace("\r", " ")
-        # LOGGER.info(f"🔍 HTML snippet for {identifier}: {snippet}")
-        # body_text = await page.inner_text("body")
-        # LOGGER.info(f"🪞 Visible text (first 300 chars): {body_text[:500]!r}")
-
-        # await page.screenshot(path=f"/tmp/{identifier}.png")
-        # LOGGER.info(f"📸 Screenshot saved for {identifier}")
-
-
-        # handle_temp = await page.query_selector_all(".yt-core-attributed-string--link-inherit-color")
-        # LOGGER.info(f"⚠️ Successfully scraped {handle_temp}")
+        # Scrape external links
         anchors = await page.query_selector_all("#link-list-container a")
-        # LOGGER.info(f"⚠️ Successfully scraped anchors {anchors}")
         for a in anchors:
             href = await a.get_attribute("href")
             if href and "youtube.com/redirect" in href:
@@ -404,12 +379,11 @@ async def scrape_about_page(context: PlaywrightContext, identifier: str, sub_lim
             if href:
                 about_links.append(href)
 
-        # --- scrape subscriptions ---
+        # Scrape subscriptions
         subs = await page.query_selector_all(
             "ytd-grid-channel-renderer a#channel-info, ytd-channel-renderer a.channel-link"
         )
 
-        # LOGGER.info(f"⚠️ Successfully scraped subs {subs}")
         for ch in subs[:sub_limit]:
             href = await ch.get_attribute("href")
             if href:
@@ -422,7 +396,7 @@ async def scrape_about_page(context: PlaywrightContext, identifier: str, sub_lim
         LOGGER.warning(f"⚠️ Error scraping About tab for {identifier}: {e}")
 
     finally:
-        # --- always close page safely ---
+        # Always close page safely
         if page:
             try:
                 await page.close()
@@ -431,13 +405,21 @@ async def scrape_about_page(context: PlaywrightContext, identifier: str, sub_lim
 
     return about_links, subscriptions
 
-import random, asyncio
 
-async def humanize_page(page, min_wait=0.5, max_wait=2.0):
-    # small pause
+async def humanize_page(page: Page, min_wait: float = 0.5, max_wait: float = 2.0) -> None:
+    """Simulate human-like behavior on the page to avoid bot detection.
+    
+    Performs random scrolling, mouse movements, and pauses.
+    
+    Args:
+        page: Playwright Page instance
+        min_wait: Minimum wait time in seconds
+        max_wait: Maximum wait time in seconds
+    """
+    # Small pause
     await asyncio.sleep(random.uniform(min_wait, max_wait))
 
-    # gentle scrolls
+    # Gentle scrolls
     height = await page.evaluate("() => document.body.scrollHeight")
     for y in range(0, height, random.randint(250, 800)):
         try:
@@ -446,22 +428,31 @@ async def humanize_page(page, min_wait=0.5, max_wait=2.0):
         except Exception:
             break
 
-    # small mouse movement
+    # Small mouse movement
     try:
-        w, h = await page.viewport_size()
+        viewport = page.viewport_size
+        w, h = viewport["width"], viewport["height"]
         for _ in range(random.randint(2, 6)):
-            await page.mouse.move(random.randint(50, w-50), random.randint(50, h-50), steps=random.randint(10, 40))
+            await page.mouse.move(
+                random.randint(50, w - 50),
+                random.randint(50, h - 50),
+                steps=random.randint(10, 40)
+            )
             await asyncio.sleep(random.uniform(0.05, 0.2))
     except Exception:
         pass
 
-    # extra pause for content to settle
+    # Extra pause for content to settle
     await asyncio.sleep(random.uniform(0.2, 0.8))
 
 
-# ───── Domain storage ─────
-def store_channel_domains(cid: str, urls: list[str]) -> None:
-    """Store About-section URLs in a separate collection."""
+def store_channel_domains(cid: str, urls: List[str]) -> None:
+    """Store channel About section URLs to Firestore channel_domains collection.
+    
+    Args:
+        cid: Channel ID
+        urls: List of external URLs from channel About page
+    """
     for url in urls:
         parsed = urlparse(url)
         hostname = parsed.hostname or url
@@ -471,19 +462,35 @@ def store_channel_domains(cid: str, urls: list[str]) -> None:
             "from_channel_id": cid,
             "url": url,
             "normalized_domain": normalized_domain,
-            "discovered_at": datetime.utcnow(),
+            "discovered_at": datetime.now(),
             "source": "about_section",
         })
 
-async def scrape_featured_channels(context: PlaywrightContext, identifier: str, limit: int = 50) -> list[str]:
-    """Scrape featured channels from the channel's 'Channels' tab (UI fallback)."""
+
+async def scrape_featured_channels(
+    context: PlaywrightContext,
+    identifier: str,
+    limit: int = 50
+) -> List[str]:
+    """Scrape featured channels from the channel's Channels tab.
+    
+    Args:
+        context: Active PlaywrightContext
+        identifier: Channel ID or handle
+        limit: Maximum number of featured channels to scrape
+        
+    Returns:
+        List of channel IDs/handles
+    """
     url = get_channel_url(identifier)
     featured = []
+    page = None
+    
     try:
         page = await context.new_page()
         await page.goto(url, timeout=30000)
 
-        # Featured channels (same tiles as subscriptions, different section header)
+        # Featured channels tiles
         tiles = await page.query_selector_all(
             "ytd-grid-channel-renderer a#channel-info, ytd-channel-renderer a.channel-link"
         )
@@ -497,14 +504,26 @@ async def scrape_featured_channels(context: PlaywrightContext, identifier: str, 
     except Exception as e:
         LOGGER.warning(f"⚠️ Failed to scrape featured channels for {identifier}: {e}")
     finally:
-        await page.close()   # 👈 ensures memory is freed
+        if page:
+            await page.close()
     return featured
 
-async def scrape_avatar_url(context: PlaywrightContext, identifier: str) -> str | None:
-    """Scrape the channel avatar image URL from the homepage."""
+
+async def scrape_avatar_url(context: PlaywrightContext, identifier: str) -> Optional[str]:
+    """Scrape channel avatar image URL from homepage.
+    
+    Args:
+        context: Active PlaywrightContext
+        identifier: Channel ID or handle
+        
+    Returns:
+        Avatar image URL, or None if not found
+    """
     url = get_channel_url(identifier)
-    page = await context.new_page()
+    page = None
+    
     try:
+        page = await context.new_page()
         await page.goto(url, timeout=30000)
         img = await page.query_selector("img.ytCoreImageHost")
         if img:
@@ -512,21 +531,38 @@ async def scrape_avatar_url(context: PlaywrightContext, identifier: str) -> str 
     except Exception as e:
         LOGGER.warning(f"⚠️ Failed to scrape avatar for {identifier}: {e}")
     finally:
-        await page.close()
+        if page:
+            await page.close()
     return None
 
+
 def upgrade_avatar_url(url: str, target_size: int = 256) -> str:
-    """
-    Replace the size component (=sXX-) in a YouTube avatar URL with =s{target_size}-.
+    """Replace size component (=sXX-) in YouTube avatar URL.
+    
+    Args:
+        url: Original avatar URL
+        target_size: Desired image size in pixels
+        
+    Returns:
+        URL with updated size parameter
     """
     if not url:
         return url
     return re.sub(r"=s\d+-", f"=s{target_size}-", url)
 
-def download_and_store_avatar(cid: str, avatar_url: str) -> str | None:
-    """Download avatar image directly from URL and save to GCS."""
+
+def download_and_store_avatar(cid: str, avatar_url: str) -> Optional[str]:
+    """Download avatar image from URL and save to GCS.
+    
+    Args:
+        cid: Channel ID
+        avatar_url: Avatar image URL
+        
+    Returns:
+        gs:// URI of uploaded avatar, or None if failed
+    """
     try:
-        resp = requests.get(upgrade_avatar_url(avatar_url,800), timeout=10)
+        resp = requests.get(upgrade_avatar_url(avatar_url, 800), timeout=10)
         arr = np.frombuffer(resp.content, dtype=np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if img is None:
@@ -535,16 +571,29 @@ def download_and_store_avatar(cid: str, avatar_url: str) -> str | None:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             cv2.imwrite(tmp.name, img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             gcs_path = f"channel_avatars/{cid}.png"
-            return upload_file_to_gcs(GCS_BUCKET_DATA, gcs_path, tmp.name, content_type="image/png")
+            return upload_file_to_gcs(
+                GCS_BUCKET_DATA, gcs_path, tmp.name, content_type="image/png"
+            )
     except Exception as e:
         LOGGER.warning(f"⚠️ Failed to download avatar {cid}: {e}")
         return None
 
-async def scrape_banner_url(context: PlaywrightContext, identifier: str) -> str | None:
-    """Scrape the channel banner image URL from the homepage."""
+
+async def scrape_banner_url(context: PlaywrightContext, identifier: str) -> Optional[str]:
+    """Scrape channel banner image URL from homepage.
+    
+    Args:
+        context: Active PlaywrightContext
+        identifier: Channel ID or handle
+        
+    Returns:
+        Banner image URL, or None if not found
+    """
     url = get_channel_url(identifier)
-    page = await context.new_page()
+    page = None
+    
     try:
+        page = await context.new_page()
         await page.goto(url, timeout=30000)
         img = await page.query_selector("yt-image-banner-view-model img")
         if img:
@@ -552,12 +601,21 @@ async def scrape_banner_url(context: PlaywrightContext, identifier: str) -> str 
     except Exception as e:
         LOGGER.warning(f"⚠️ Failed to scrape banner for {identifier}: {e}")
     finally:
-        await page.close()
+        if page:
+            await page.close()
     return None
 
 
-def download_and_store_banner(cid: str, banner_url: str) -> str | None:
-    """Download banner image directly from URL and save to GCS."""
+def download_and_store_banner(cid: str, banner_url: str) -> Optional[str]:
+    """Download banner image from URL and save to GCS.
+    
+    Args:
+        cid: Channel ID
+        banner_url: Banner image URL
+        
+    Returns:
+        gs:// URI of uploaded banner, or None if failed
+    """
     try:
         resp = requests.get(banner_url, timeout=10)
         arr = np.frombuffer(resp.content, dtype=np.uint8)
@@ -568,18 +626,33 @@ def download_and_store_banner(cid: str, banner_url: str) -> str | None:
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             cv2.imwrite(tmp.name, img, [cv2.IMWRITE_JPEG_QUALITY, 90])
             gcs_path = f"channel_banners/{cid}.jpg"
-            return upload_file_to_gcs(GCS_BUCKET_DATA, gcs_path, tmp.name, content_type="image/jpeg")
+            return upload_file_to_gcs(
+                GCS_BUCKET_DATA, gcs_path, tmp.name, content_type="image/jpeg"
+            )
     except Exception as e:
         LOGGER.warning(f"⚠️ Failed to download banner {cid}: {e}")
         return None
 
 
-# ───── Channel doc helper ─────
+# ============================================================================
+# Firestore Document Management
+# ============================================================================
+
 def _init_channel_doc(
-    batch, cid: str, channel_item: dict | None, screenshot_uri: str | None, scraped_only: bool = False
+    batch,
+    cid: str,
+    channel_item: Optional[dict],
+    screenshot_uri: Optional[str],
+    scraped_only: bool = False
 ) -> None:
-    """Initialize a channel Firestore doc with metadata, metrics, timestamps.
-       scraped_only=True → store skeleton doc with is_metadata_missing=True.
+    """Initialize a channel Firestore document with metadata and metrics.
+    
+    Args:
+        batch: Firestore batch write
+        cid: Channel ID
+        channel_item: YouTube API channel response item (or None)
+        screenshot_uri: gs:// URI of screenshot (or None)
+        scraped_only: If True, store skeleton doc with is_metadata_missing=True
     """
     doc_ref = db.collection("channel").document(cid)
     if doc_ref.get().exists:
@@ -588,7 +661,7 @@ def _init_channel_doc(
     avatar_url, avatar_gcs_uri, banner_gcs_uri, metrics = None, None, None, {}
 
     if channel_item and not scraped_only:
-        # avatar URL from snippet
+        # Extract avatar URL from snippet
         snippet = channel_item.get("snippet", {})
         if "thumbnails" in snippet:
             avatar_url = (
@@ -596,11 +669,11 @@ def _init_channel_doc(
                 or snippet.get("thumbnails", {}).get("default", {}).get("url")
             )
 
-        # save avatar + banner to GCS
+        # Save avatar and banner to GCS
         avatar_gcs_uri = store_avatar_to_gcs(cid, channel_item)
         banner_gcs_uri = store_banner_to_gcs(cid, channel_item)
 
-        # classify avatar
+        # Classify avatar
         if avatar_url:
             try:
                 _, metrics = classify_avatar_url(avatar_url, size=128)
@@ -609,14 +682,13 @@ def _init_channel_doc(
 
     data = {
         "channel_id": cid,
-        "registered_at": datetime.utcnow(),
-        "last_checked_at": datetime.utcnow(),
+        "registered_at": datetime.now(),
+        "last_checked_at": datetime.now(),
         "is_bot": True,
         "is_bot_check_type": "propagated",
         "is_bot_checked": True,
         "is_screenshot_stored": bool(screenshot_uri),
         "screenshot_gcs_uri": screenshot_uri,
-        # always include these fields, even if None
         "avatar_url": avatar_url,
         "avatar_gcs_uri": avatar_gcs_uri,
         "banner_gcs_uri": banner_gcs_uri,
@@ -627,9 +699,24 @@ def _init_channel_doc(
     batch.set(doc_ref, data)
 
 
+# ============================================================================
+# Bot Graph Expansion
+# ============================================================================
 
-# ───── Expansion ─────
 async def expand_bot_graph_async(seed_channels: List[str]) -> None:
+    """Expand the bot graph by recursively discovering channels.
+    
+    Starting from seed channels, recursively discovers and processes:
+    - Channel metadata via YouTube API
+    - Featured channels and subscriptions
+    - About page external links
+    - Screenshots and avatars
+    
+    Stores all data to Firestore and GCS.
+    
+    Args:
+        seed_channels: Initial list of channel IDs to start expansion from
+    """
     if not seed_channels:
         LOGGER.info("No seed channels passed")
         return
@@ -671,8 +758,8 @@ async def expand_bot_graph_async(seed_channels: List[str]) -> None:
                             "handle": identifier,
                             "screenshot_gcs_uri": screenshot_uri,
                             "is_metadata_missing": True,
-                            "discovered_at": datetime.utcnow(),
-                            "last_checked_at": datetime.utcnow(),
+                            "discovered_at": datetime.now(),
+                            "last_checked_at": datetime.now(),
                         }, merge=True)
                 
                     sec = (
@@ -697,7 +784,7 @@ async def expand_bot_graph_async(seed_channels: List[str]) -> None:
                                     db.collection("channel_links").add({
                                         "from_channel_id": identifier,
                                         "to_channel_id": featured,
-                                        "discovered_at": datetime.utcnow(),
+                                        "discovered_at": datetime.now(),
                                         "source": "channelSections",
                                     })
 
@@ -721,8 +808,8 @@ async def expand_bot_graph_async(seed_channels: List[str]) -> None:
                         # Store skeleton doc since no API metadata
                         data = {
                             "channel_id": identifier,
-                            "registered_at": datetime.utcnow(),
-                            "last_checked_at": datetime.utcnow(),
+                            "registered_at": datetime.now(),
+                            "last_checked_at": datetime.now(),
                             "is_bot": True,
                             "is_bot_check_type": "propagated",
                             "is_bot_checked": True,
@@ -746,8 +833,8 @@ async def expand_bot_graph_async(seed_channels: List[str]) -> None:
                             "banner_url": banner_url,
                             "banner_gcs_uri": banner_gcs_uri,
                             "is_metadata_missing": True,
-                            "discovered_at": datetime.utcnow(),
-                            "last_checked_at": datetime.utcnow(),
+                            "discovered_at": datetime.now(),
+                            "last_checked_at": datetime.now(),
                         }, merge=True)
 
                     if identifier.startswith("UC"):
@@ -759,8 +846,8 @@ async def expand_bot_graph_async(seed_channels: List[str]) -> None:
                             "handle": identifier,
                             "screenshot_gcs_uri": screenshot_uri,
                             "is_metadata_missing": True,
-                            "discovered_at": datetime.utcnow(),
-                            "last_checked_at": datetime.utcnow(),
+                            "discovered_at": datetime.now(),
+                            "last_checked_at": datetime.now(),
                         }, merge=True)
 
                     featured = await scrape_featured_channels(context, identifier)
@@ -775,7 +862,7 @@ async def expand_bot_graph_async(seed_channels: List[str]) -> None:
                                 db.collection("channel_links").add({
                                     "from_channel_id": identifier,
                                     "to_channel_id": f_id,
-                                    "discovered_at": datetime.utcnow(),
+                                    "discovered_at": datetime.now(),
                                     "source": "featured_scrape",
                                     "needs_resolution": False,
                                 })
@@ -792,13 +879,13 @@ async def expand_bot_graph_async(seed_channels: List[str]) -> None:
                             db.collection("channel_links").add({
                                 "from_channel_id": identifier,
                                 "to_channel_handle": handle,
-                                "discovered_at": datetime.utcnow(),
+                                "discovered_at": datetime.now(),
                                 "source": "featured_scrape",
                                 "needs_resolution": True,
                             })
                             db.collection("channel_pending").document(handle).set({
                                 "handle": handle,
-                                "discovered_at": datetime.utcnow(),
+                                "discovered_at": datetime.now(),
                                 "source": "featured_scrape",
                                 "needs_resolution": True,
                             })
@@ -825,13 +912,13 @@ async def expand_bot_graph_async(seed_channels: List[str]) -> None:
                             db.collection("channel_links").add({
                                 "from_channel_id": identifier,
                                 "to_channel_handle": handle,
-                                "discovered_at": datetime.utcnow(),
+                                "discovered_at": datetime.now(),
                                 "source": "subscriptions",
                                 "needs_resolution": True,
                             })
                             db.collection("channel_pending").document(handle).set({
                                 "handle": handle,
-                                "discovered_at": datetime.utcnow(),
+                                "discovered_at": datetime.now(),
                                 "source": "subscriptions",
                                 "needs_resolution": True,
                             })
@@ -846,7 +933,7 @@ async def expand_bot_graph_async(seed_channels: List[str]) -> None:
                         db.collection("channel_links").add({
                             "from_channel_id": identifier,
                             "to_channel_id": sub_id,
-                            "discovered_at": datetime.utcnow(),
+                            "discovered_at": datetime.now(),
                             "source": "subscriptions",
                             "needs_resolution": False,
                         })
