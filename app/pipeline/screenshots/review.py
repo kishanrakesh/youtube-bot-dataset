@@ -5,7 +5,7 @@ Step 3: Manual review of channel screenshots (OpenCV UI).
 
 import logging, os, asyncio
 from dotenv import load_dotenv; load_dotenv()
-from app.pipeline.expand_bot_graph import expand_bot_graph_async
+from app.pipeline.channels.scraping import expand_bot_graph_async
 
 from app.labelling.review_channel_screenshots import fetch_docs, review_docs
 

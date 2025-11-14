@@ -12,7 +12,7 @@ REVIEW_LIMIT = 100
 .PHONY: fetch-trending
 fetch-trending:
 	@echo "🌎 Fetching trending videos..."
-	python -m app.pipeline.fetch_trending \
+	python -m app.pipeline.trending.fetch \
 		--region $(TRENDING_REGION) \
 		--category $(CATEGORY) \
 		--date $(DATE) \
@@ -21,7 +21,7 @@ fetch-trending:
 .PHONY: load-trending
 load-trending:
 	@echo "📥 Loading trending results..."
-	python -m app.pipeline.load_trending \
+	python -m app.pipeline.trending.load \
 		--region $(TRENDING_REGION) \
 		--category $(CATEGORY) \
 		--date $(DATE) \
@@ -30,7 +30,7 @@ load-trending:
 .PHONY: fetch-comments
 fetch-comments:
 	@echo "🗨️ Fetching comments for trending videos..."
-	python -m app.pipeline.fetch_video_comments \
+	python -m app.pipeline.comments.fetch \
 		--region $(TRENDING_REGION) \
 		--category $(CATEGORY) \
 		--date $(DATE) \
@@ -40,19 +40,19 @@ fetch-comments:
 .PHONY: register-commenters
 register-commenters:
 	@echo "📝 Registering commenter channels..."
-	python -m app.pipeline.register_commenters \
+	python -m app.pipeline.comments.register \
 		--limit $(REVIEW_LIMIT)
 
 .PHONY: capture-screenshots
 capture-screenshots:
 	@echo "📸 Capturing channel screenshots..."
-	python -m app.pipeline.capture_screenshots \
+	python -m app.pipeline.screenshots.capture \
 		--limit $(SCREENSHOT_LIMIT)
 
 .PHONY: review
 review:
 	@echo "👀 Launching manual review UI..."
-	python -m app.pipeline.review_channels \
+	python -m app.pipeline.screenshots.review \
 		--limit $(REVIEW_LIMIT)
 
 # ───── End-to-end workflows ─────

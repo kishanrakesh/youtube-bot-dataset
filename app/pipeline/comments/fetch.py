@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse, logging
 from app.youtube_api.fetch_comment_threads_by_video_id import fetch_comment_threads_by_video_id
-from app.pipeline.load_trending import main as load_trending
+from app.pipeline.trending.load import main as load_trending
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
