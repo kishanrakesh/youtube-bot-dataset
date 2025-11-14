@@ -22,7 +22,7 @@ from google.cloud import firestore, storage
 # from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 import asyncio
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
-from app.pipeline.expand_bot_graph import PlaywrightContext, get_channel_url
+from app.pipeline.channels.scraping import PlaywrightContext, get_channel_url
 from app.utils.gcs_utils import upload_png  # reuse your existing GCS helper
 
 # ───── config ─────

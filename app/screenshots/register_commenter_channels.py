@@ -20,7 +20,7 @@ COLLECTION_NAME = "channel"
 LIKE_THRESHOLD  = 5  # only include commenters with >=10 likes
 
 
-from app.pipeline.expand_bot_graph import PlaywrightContext, scrape_about_page
+from app.pipeline.channels.scraping import PlaywrightContext, scrape_about_page
 
 import asyncio
 
@@ -45,7 +45,7 @@ import ijson
 from google.cloud import firestore, storage
 
 from app.utils.image_processing import classify_avatar_url, get_xgb_model
-from app.pipeline.expand_bot_graph import PlaywrightContext, scrape_about_page
+from app.pipeline.channels.scraping import PlaywrightContext, scrape_about_page
 
 LOGGER = logging.getLogger("register_commenters")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
