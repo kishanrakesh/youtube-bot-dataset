@@ -7,7 +7,7 @@ import logging, os, asyncio
 from dotenv import load_dotenv; load_dotenv()
 from app.pipeline.channels.scraping import expand_bot_graph_async
 
-from app.labelling.review_channel_screenshots import fetch_docs, review_docs
+from app.pipeline.screenshots.review_ui import fetch_docs, review_docs
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 

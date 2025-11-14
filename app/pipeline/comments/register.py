@@ -10,7 +10,7 @@ Step 1: Register commenter channels from video_comments/raw JSONs in GCS.
 import logging, os, asyncio, argparse
 from dotenv import load_dotenv; load_dotenv()
 
-from app.screenshots.register_commenter_channels import register_commenter_channels
+from app.pipeline.comments.register_channels import register_commenter_channels
 from app.utils.gcs_utils import list_gcs_files
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

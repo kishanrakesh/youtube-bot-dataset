@@ -10,9 +10,9 @@ Smoke test for the annotation pipeline:
 import logging, os, asyncio
 from dotenv import load_dotenv; load_dotenv()
 
-from app.screenshots.register_commenter_channels import register_commenter_channels
+from app.pipeline.comments.register_channels import register_commenter_channels
 from app.pipeline.screenshots.capture import fetch_channels_needing_screenshots, save_screenshots
-from app.labelling.review_channel_screenshots import fetch_docs, review_docs
+from app.pipeline.screenshots.review_ui import fetch_docs, review_docs
 from app.utils.gcs_utils import list_gcs_files   # helper to list objects in GCS
 
 # ───── config ─────
