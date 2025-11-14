@@ -1,9 +1,21 @@
+"""Channel-related Data Transfer Objects (DTOs).
+
+This module contains all DTOs related to YouTube channels, including:
+- ChannelDTO: Core channel information and metadata
+- ChannelLabelDTO: Bot classification labels
+- ChannelScreenshotDTO: Screenshot capture metadata
+- ChannelStatusDTO: Channel availability status
+"""
+
 from dataclasses import dataclass, field, asdict
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
+
 
 @dataclass
 class ChannelDTO:
+    """Core channel information from YouTube API."""
+    
     # --- Core Identity ---
     id: str
     handle: Optional[str] = None
@@ -64,4 +76,77 @@ class ChannelDTO:
             uploads_playlist_id=data.get("uploads_playlist_id"),
             is_linked=data.get("is_linked"),
             is_made_for_kids=data.get("is_made_for_kids"),
+        )
+
+
+@dataclass
+class ChannelLabelDTO:
+    """Bot classification label for a channel."""
+    
+    channel_id: str
+    label: Literal["yes", "no", "suspected"]
+    labeled_at: datetime
+    label_source: str  # e.g., "manual", "screenshot", "model_v1"
+
+    def to_dict(self) -> dict:
+        return {
+            "channel_id": self.channel_id,
+            "label": self.label,
+            "labeled_at": self.labeled_at.isoformat(),
+            "label_source": self.label_source
+        }
+
+    @staticmethod
+    def from_dict(data: dict) -> "ChannelLabelDTO":
+        return ChannelLabelDTO(
+            channel_id=data["channel_id"],
+            label=data["label"],
+            labeled_at=datetime.fromisoformat(data["labeled_at"]),
+            label_source=data["label_source"]
+        )
+
+
+@dataclass
+class ChannelScreenshotDTO:
+    """Screenshot capture metadata for a channel."""
+    
+    channel_id: str
+    gcs_uri: str
+    captured_at: datetime
+    batch_id: str  # Optional but useful for tracking review batches
+
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["captured_at"] = data["captured_at"].isoformat()
+        return data
+
+    @staticmethod
+    def from_dict(data: dict) -> "ChannelScreenshotDTO":
+        return ChannelScreenshotDTO(
+            channel_id=data["channel_id"],
+            gcs_uri=data["gcs_uri"],
+            captured_at=datetime.fromisoformat(data["captured_at"]),
+            batch_id=data["batch_id"]
+        )
+
+
+@dataclass
+class ChannelStatusDTO:
+    """Channel availability status."""
+    
+    channel_id: str
+    status: Literal["active", "removed"]
+    checked_at: datetime
+
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["checked_at"] = data["checked_at"].isoformat()
+        return data
+
+    @staticmethod
+    def from_dict(data: dict) -> "ChannelStatusDTO":
+        return ChannelStatusDTO(
+            channel_id=data["channel_id"],
+            status=data["status"],
+            checked_at=datetime.fromisoformat(data["checked_at"])
         )

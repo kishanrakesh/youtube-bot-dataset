@@ -1,9 +1,17 @@
+"""Comment-related Data Transfer Objects (DTOs).
+
+This module contains DTOs for YouTube video comments.
+"""
+
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from typing import Optional
 
+
 @dataclass
 class CommentDTO:
+    """Video comment information from YouTube API."""
+    
     comment_id: str
     video_id: str
     author_channel_id: str

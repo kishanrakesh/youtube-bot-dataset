@@ -1,9 +1,17 @@
+"""Video-related Data Transfer Objects (DTOs).
+
+This module contains DTOs for YouTube videos.
+"""
+
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List
 from datetime import datetime
 
+
 @dataclass
 class VideoDTO:
+    """Core video information from YouTube API."""
+    
     video_id: str
     title: Optional[str]
     description: Optional[str]
