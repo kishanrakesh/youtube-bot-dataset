@@ -1,28 +1,35 @@
 #!/usr/bin/env python3
-"""
-Expand the bot graph:
-- Start from seed bots (CLI or Firestore)
-- Fetch channel + channelSections
-- Take screenshot of homepage
-- Scrape About page for external links + subscriptions
-- Add featured/subscription channels recursively until exhaustion
-- Store raw JSON + screenshots in GCS
-- Add full channel docs with metrics, timestamps, screenshot URI in Firestore
+"""Channel graph expansion and scraping with Playwright.
+
+This module provides functionality to:
+- Start from seed bot channels (CLI or Firestore)
+- Fetch channel metadata and sections via YouTube API
+- Take screenshots of channel homepages
+- Scrape About pages for external links and subscriptions
+- Recursively add featured/subscription channels until exhaustion
+- Store raw JSON and screenshots in GCS
+- Add complete channel documents with metrics to Firestore
 """
 
+import asyncio
+import json
 import logging
-import random, json
+import random
+import re
+import tempfile
 from datetime import datetime
-from typing import List, Set, Tuple
-import asyncio, re
+from typing import List, Set, Tuple, Optional
 from urllib.parse import urlparse, unquote, parse_qs
 
+import cv2
+import numpy as np
+import requests
 from google.cloud import firestore
 from googleapiclient.errors import HttpError
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Page
 
 from app.utils.clients import get_youtube
-from app.utils.gcs_utils import write_json_to_gcs, upload_png
+from app.utils.gcs_utils import write_json_to_gcs, upload_png, upload_file_to_gcs
 from app.utils.paths import (
     channel_metadata_raw_path,
     channel_sections_raw_path,
@@ -30,58 +37,74 @@ from app.utils.paths import (
 from app.utils.image_processing import classify_avatar_url
 from app.env import GCS_BUCKET_DATA
 
-import cv2, requests, tempfile
-import numpy as np
-from app.utils.gcs_utils import upload_file_to_gcs
-
-LOGGER = logging.getLogger("expand_bot_graph")
+LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 db = firestore.Client()
 USE_API = False
 
 USER_AGENTS = [
-    # ---- Chrome (Windows / macOS / Linux) ----
+    # Chrome (Windows / macOS / Linux)
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6167.140 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.234 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.234 Safari/537.36",
-
-    # ---- Safari (macOS / iOS) ----
+    
+    # Safari (macOS / iOS)
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (iPad; CPU OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-
-    # ---- Firefox (Windows / macOS / Linux) ----
+    
+    # Firefox (Windows / macOS / Linux)
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13.4; rv:121.0) Gecko/20100101 Firefox/121.0",
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
-
-    # ---- Edge (Windows) ----
+    
+    # Edge (Windows)
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6167.140 Safari/537.36 Edg/121.0.2277.128",
-
-    # ---- Android (Chrome Mobile) ----
+    
+    # Android (Chrome Mobile)
     "Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.234 Mobile Safari/537.36",
     "Mozilla/5.0 (Linux; Android 12; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6167.140 Mobile Safari/537.36",
-
-    # ---- Old but still valid fallbacks ----
+    
+    # Fallbacks
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
 ]
 
-# ───── Playwright context manager (Cloud-Run safe) ─────
+
+# ============================================================================
+# Playwright Context Manager
+# ============================================================================
 
 class PlaywrightContext:
-    def __init__(self):
+    """Async context manager for Playwright browser automation.
+    
+    Manages browser lifecycle with automatic crash recovery for Cloud Run.
+    Maintains a persistent browser context across multiple page operations.
+    """
+    
+    def __init__(self) -> None:
+        """Initialize the Playwright context manager."""
         self.playwright = None
         self.browser = None
-        self.context = None  # 👈 store context persistently
+        self.context = None
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "PlaywrightContext":
+        """Start Playwright and launch browser on context entry.
+        
+        Returns:
+            Self for use as async context manager
+        """
         self.playwright = await async_playwright().start()
         self.browser, self.context = await self._launch_browser()
         return self
 
-    async def _launch_browser(self):
+    async def _launch_browser(self) -> Tuple:
+        """Launch a new Chromium browser instance with anti-detection settings.
+        
+        Returns:
+            Tuple of (browser, context) for reuse
+        """
         ua = random.choice(USER_AGENTS)
         browser = await self.playwright.chromium.launch(
             headless=True,
@@ -111,8 +134,14 @@ class PlaywrightContext:
         }""")
         return browser, context
 
-    async def new_page(self):
-        """Safely open a new tab; relaunch browser if crashed."""
+    async def new_page(self) -> Page:
+        """Safely open a new browser tab with automatic crash recovery.
+        
+        If the browser context is missing or crashed, automatically relaunch.
+        
+        Returns:
+            New Playwright Page instance
+        """
         if not self.context:
             LOGGER.warning("⚠️ Browser context missing — relaunching")
             self.browser, self.context = await self._launch_browser()
@@ -128,7 +157,14 @@ class PlaywrightContext:
             page.set_default_navigation_timeout(60000)
             return page
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        """Clean up browser and Playwright on context exit.
+        
+        Args:
+            exc_type: Exception type (if any)
+            exc: Exception instance (if any)
+            tb: Exception traceback (if any)
+        """
         try:
             if self.context:
                 await self.context.close()
@@ -139,16 +175,36 @@ class PlaywrightContext:
                 await self.playwright.stop()
 
 
+# ============================================================================
+# Helper Functions
+# ============================================================================
 
 def get_channel_url(identifier: str, tab: str = "") -> str:
+    """Construct a YouTube channel URL from ID or handle.
+    
+    Args:
+        identifier: Channel ID (UCxxx) or handle (@username)
+        tab: Optional tab path (e.g., '/about', '/videos')
+        
+    Returns:
+        Full YouTube channel URL
+    """
     if identifier.startswith("UC"):
         return f"https://www.youtube.com/channel/{identifier}{tab}"
     else:
         return f"https://www.youtube.com/@{identifier}{tab}"
 
 
-def store_avatar_to_gcs(cid: str, channel_item: dict) -> str | None:
-    """Download the highest-quality avatar and save to GCS. Return gs:// URI."""
+def store_avatar_to_gcs(cid: str, channel_item: dict) -> Optional[str]:
+    """Download channel avatar and save to GCS.
+    
+    Args:
+        cid: Channel ID
+        channel_item: YouTube API channel response item
+        
+    Returns:
+        gs:// URI of uploaded avatar, or None if failed
+    """
     thumbs = channel_item.get("snippet", {}).get("thumbnails", {})
     avatar_url = (
         thumbs.get("maxres", {}).get("url") or
@@ -169,14 +225,25 @@ def store_avatar_to_gcs(cid: str, channel_item: dict) -> str | None:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             cv2.imwrite(tmp.name, img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             gcs_path = f"channel_avatars/{cid}.png"
-            gcs_uri = upload_file_to_gcs(GCS_BUCKET_DATA, gcs_path, tmp.name, content_type="image/png")
+            gcs_uri = upload_file_to_gcs(
+                GCS_BUCKET_DATA, gcs_path, tmp.name, content_type="image/png"
+            )
         return gcs_uri
     except Exception as e:
         LOGGER.warning(f"⚠️ Failed to save avatar for {cid}: {e}")
         return None
 
-def store_banner_to_gcs(cid: str, channel_item: dict) -> str | None:
-    """Download the channel banner image (if available) and save to GCS."""
+
+def store_banner_to_gcs(cid: str, channel_item: dict) -> Optional[str]:
+    """Download channel banner image and save to GCS.
+    
+    Args:
+        cid: Channel ID
+        channel_item: YouTube API channel response item
+        
+    Returns:
+        gs:// URI of uploaded banner, or None if not available or failed
+    """
     banner_url = (
         channel_item.get("brandingSettings", {})
         .get("image", {})
@@ -204,16 +271,26 @@ def store_banner_to_gcs(cid: str, channel_item: dict) -> str | None:
         return None
 
 
-# ───── Screenshot helper ─────
-async def capture_home_screenshot(context: PlaywrightContext, identifier: str) -> str | None:
-    """Take screenshot of the channel's homepage, upload to GCS, return gs:// URI."""
+async def capture_home_screenshot(
+    context: PlaywrightContext, 
+    identifier: str
+) -> Optional[str]:
+    """Capture a screenshot of the channel's homepage.
+    
+    Args:
+        context: Active PlaywrightContext
+        identifier: Channel ID or handle
+        
+    Returns:
+        gs:// URI of uploaded screenshot, or None if failed
+    """
     url = get_channel_url(identifier)
     page = await context.new_page()
     try:
         await page.goto(url, timeout=60000)
         await page.wait_for_selector("#contents", state="visible", timeout=15000)
-        await page.evaluate("window.scrollBy(0, 800)")  # force load more elements
-        await asyncio.sleep(3)  # give time for thumbnails to render
+        await page.evaluate("window.scrollBy(0, 800)")  # Force load more elements
+        await asyncio.sleep(3)  # Give time for thumbnails to render
         png = await page.screenshot(full_page=True)
         return upload_png(GCS_BUCKET_DATA, identifier, png)
     except Exception as e:
@@ -223,9 +300,16 @@ async def capture_home_screenshot(context: PlaywrightContext, identifier: str) -
         await page.close()
 
 
-
-def resolve_handle_to_id(youtube, handle: str) -> str | None:
-    """Resolve @handle to channel ID (UCxxxx)."""
+def resolve_handle_to_id(youtube, handle: str) -> Optional[str]:
+    """Resolve @handle to channel ID using YouTube API search.
+    
+    Args:
+        youtube: YouTube API client
+        handle: Handle string (e.g., '@username')
+        
+    Returns:
+        Channel ID (UCxxx...), or None if not found
+    """
     try:
         q = handle.lstrip("@")
         resp = youtube.search().list(
