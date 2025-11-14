@@ -1,5 +1,5 @@
 import re, cv2, numpy as np, requests, joblib, os
-from app.analysis.classifier_utils import score_with_pca_kmeans
+from app.analysis.inference.classifier_utils import score_with_pca_kmeans
 
 _MODEL = None
 def get_xgb_model(model_path="xgb_bot_model.pkl"):
