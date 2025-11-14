@@ -1,43 +1,17 @@
-#app/screenshots/register_commenter_channels.py
-#!/usr/bin/env python3
+"""Register commenter channels from comment JSONs in GCS.
+
+Features:
+- Manifest-based resumability (GCS manifest: completed & in_progress)
+- Streaming parse of large JSONs using ijson (low memory)
+- Sequential processing with single Playwright browser
+- Batched Firestore commits (default 100)
+- Avatar classification and bot detection
+- About page scraping for external links and featured channels
 """
-Register commenter channels OR backfill bot probabilities for existing channels.
-"""
-
-import logging
-from datetime import datetime
-from typing import Optional, Set
-import os
-
-from google.cloud import firestore
-from app.utils.gcs_utils import read_json_from_gcs
-from app.utils.image_processing import classify_avatar_url, get_xgb_model
-
-LOGGER = logging.getLogger("register_commenters")
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-
-COLLECTION_NAME = "channel"
-LIKE_THRESHOLD  = 5  # only include commenters with >=10 likes
-
-
-from app.pipeline.channels.scraping import PlaywrightContext, scrape_about_page
 
 import asyncio
-
-# app/screenshots/register_commenter_channels.py
-#!/usr/bin/env python3
-"""
-Register commenter channels from comment JSONs in GCS, with:
-- Manifest-based resumability (GCS manifest: completed & in_progress).
-- LIMIT applies to number of JSON files processed.
-- Streaming parse of large JSONs using ijson (low memory).
-- Bounded concurrency via asyncio.Queue and worker pool.
-- Batched Firestore commits (default 100).
-- Reuses your PlaywrightContext + scrape_about_page.
-- Preserves existing Firestore doc schema and avatar/XGB logic.
-"""
-
-import logging, os, asyncio, json, time
+import json
+import logging
 from datetime import datetime
 from typing import Optional, Set, List
 
@@ -47,19 +21,35 @@ from google.cloud import firestore, storage
 from app.utils.image_processing import classify_avatar_url, get_xgb_model
 from app.pipeline.channels.scraping import PlaywrightContext, scrape_about_page
 
-LOGGER = logging.getLogger("register_commenters")
+LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 COLLECTION_NAME = "channel"
 
 
-# ------------------------- Manifest helpers -------------------------
+# ============================================================================
+# Manifest Helpers
+# ============================================================================
 
-def _storage_client():
+def _storage_client() -> storage.Client:
+    """Get Google Cloud Storage client.
+    
+    Returns:
+        Initialized storage client
+    """
     return storage.Client()
 
+
 def _manifest_load(bucket: str, manifest_path: str) -> dict:
-    """Load manifest JSON from GCS or return default structure."""
+    """Load manifest JSON from GCS or return default structure.
+    
+    Args:
+        bucket: GCS bucket name
+        manifest_path: Path to manifest file in bucket
+        
+    Returns:
+        Manifest dictionary with completed, in_progress, and last_run fields
+    """
     client = _storage_client()
     blob = client.bucket(bucket).blob(manifest_path)
     if not blob.exists():
@@ -69,18 +59,42 @@ def _manifest_load(bucket: str, manifest_path: str) -> dict:
     except Exception:
         return {"completed": [], "in_progress": None, "last_run": None}
 
+
 def _manifest_save(bucket: str, manifest_path: str, manifest: dict) -> None:
+    """Save manifest JSON to GCS with updated timestamp.
+    
+    Args:
+        bucket: GCS bucket name
+        manifest_path: Path to manifest file in bucket
+        manifest: Manifest dictionary to save
+    """
     client = _storage_client()
     blob = client.bucket(bucket).blob(manifest_path)
-    manifest["last_run"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    manifest["last_run"] = datetime.now().isoformat(timespec="seconds") + "Z"
     blob.upload_from_string(json.dumps(manifest, ensure_ascii=False))
 
+
 def _manifest_mark_in_progress(bucket: str, manifest_path: str, gcs_path: str) -> None:
+    """Mark a file as currently being processed in the manifest.
+    
+    Args:
+        bucket: GCS bucket name
+        manifest_path: Path to manifest file in bucket
+        gcs_path: Path to file being processed
+    """
     m = _manifest_load(bucket, manifest_path)
     m["in_progress"] = gcs_path
     _manifest_save(bucket, manifest_path, m)
 
+
 def _manifest_mark_completed(bucket: str, manifest_path: str, gcs_path: str) -> None:
+    """Mark a file as completed in the manifest.
+    
+    Args:
+        bucket: GCS bucket name
+        manifest_path: Path to manifest file in bucket
+        gcs_path: Path to completed file
+    """
     m = _manifest_load(bucket, manifest_path)
     if gcs_path not in m.get("completed", []):
         m.setdefault("completed", []).append(gcs_path)
@@ -88,12 +102,22 @@ def _manifest_mark_completed(bucket: str, manifest_path: str, gcs_path: str) -> 
     _manifest_save(bucket, manifest_path, m)
 
 
-# ------------------------- Streaming JSON -------------------------
+# ============================================================================
+# Streaming JSON Parser
+# ============================================================================
 
 def _iter_comment_items_from_gcs(bucket: str, blob_path: str):
-    """
-    Incrementally yield each item in the top-level 'items' array of a commentThreads response.
-    Uses ijson to avoid loading the full JSON into memory.
+    """Incrementally yield comment thread items from a GCS JSON file.
+    
+    Uses ijson to avoid loading the full JSON into memory. Yields each item
+    in the top-level 'items' array of a commentThreads response.
+    
+    Args:
+        bucket: GCS bucket name
+        blob_path: Path to comment JSON file in bucket
+        
+    Yields:
+        Individual comment thread objects from the 'items' array
     """
     client = _storage_client()
     blob = client.bucket(bucket).blob(blob_path)
@@ -102,52 +126,98 @@ def _iter_comment_items_from_gcs(bucket: str, blob_path: str):
             yield obj
 
 
-# ------------------------- Firestore batching -------------------------
+# ============================================================================
+# Firestore Batching
+# ============================================================================
 
 class _Batcher:
-    """Async-friendly Firestore batcher (commit in a thread)."""
-    def __init__(self, client: firestore.Client, batch_size: int = 100):
+    """Async-friendly Firestore batcher with automatic commits.
+    
+    Batches Firestore write operations and commits them when the batch
+    size is reached. Thread-safe for async usage.
+    """
+    
+    def __init__(self, client: firestore.Client, batch_size: int = 100) -> None:
+        """Initialize the batcher.
+        
+        Args:
+            client: Firestore client instance
+            batch_size: Number of operations before auto-commit
+        """
         self.client = client
         self.batch_size = batch_size
         self._batch = self.client.batch()
         self._count = 0
         self._lock = asyncio.Lock()
 
-    async def set(self, doc_ref, data, merge=False):
+    async def set(self, doc_ref, data: dict, merge: bool = False) -> None:
+        """Add a set operation to the batch.
+        
+        Args:
+            doc_ref: Firestore document reference
+            data: Data to set
+            merge: Whether to merge with existing data
+        """
         async with self._lock:
             self._batch.set(doc_ref, data, merge=merge)
             self._count += 1
             if self._count >= self.batch_size:
                 await self._commit_locked()
 
-    async def _commit_locked(self):
+    async def _commit_locked(self) -> None:
+        """Commit the current batch (must hold lock).
+        
+        Creates a new batch for subsequent operations.
+        """
         batch = self._batch
         self._batch = self.client.batch()
         self._count = 0
         await asyncio.to_thread(batch.commit)
 
-    async def flush(self):
+    async def flush(self) -> None:
+        """Flush any remaining operations in the batch."""
         async with self._lock:
             if self._count > 0:
                 await self._commit_locked()
 
 
-# ------------------------- Core extraction helpers -------------------------
+# ============================================================================
+# Data Extraction Helpers
+# ============================================================================
 
 def _extract_channel_id_from_thread(thread: dict) -> Optional[str]:
+    """Extract commenter channel ID from comment thread.
+    
+    Args:
+        thread: Comment thread object from YouTube API
+        
+    Returns:
+        Channel ID or None if not found
+    """
     try:
         return thread["snippet"]["topLevelComment"]["snippet"]["authorChannelId"]["value"]
     except Exception:
         return None
 
+
 def _extract_like_count_from_thread(thread: dict) -> int:
+    """Extract like count from comment thread.
+    
+    Args:
+        thread: Comment thread object from YouTube API
+        
+    Returns:
+        Like count (defaults to 0 if not found)
+    """
     try:
         return int(thread["snippet"]["topLevelComment"]["snippet"].get("likeCount", 0))
     except Exception:
         return 0
 
 
-# ------------------------- Main entry -------------------------
+# ============================================================================
+# Main Registration Function
+# ============================================================================
 
 async def register_commenter_channels(
     bucket: str,
@@ -159,12 +229,21 @@ async def register_commenter_channels(
     force: bool = False,
     resume: bool = True,
 ) -> None:
+    """Register commenter channels from GCS comment JSON files.
+    
+    Sequential processing of comment files using a single Playwright browser.
+    Extracts channels from comments, classifies avatars, scrapes About pages,
+    and registers channels in Firestore.
+    
+    Args:
+        bucket: GCS bucket name
+        gcs_paths: List of paths to comment JSON files
+        limit_files: Maximum number of files to process (None = all)
+        like_threshold: Minimum likes required to include a commenter
+        manifest_path: Path to manifest file for tracking progress
+        force: If True, reprocess completed files
+        resume: If True, skip files marked as completed in manifest
     """
-    Sequential version of register_commenter_channels.
-    Processes each comment JSON in order using a single Playwright browser.
-    Much slower but stable and memory-safe for long-running jobs.
-    """
-
     db = firestore.Client()
     model = get_xgb_model()
 
@@ -244,7 +323,7 @@ async def register_commenter_channels(
                     "featured_channels_count": len(subs),
                     "is_screenshot_stored": False,
                     "is_bot_checked": False,
-                    "registered_at": datetime.utcnow(),
+                    "registered_at": datetime.now(),
                     "source": "register-commenters",
                 }
                 await batcher.set(doc_ref, data, merge=True)
@@ -258,71 +337,34 @@ async def register_commenter_channels(
     LOGGER.info(f"🎉 Done! New channels this run: {total_new}")
 
 
-
-# async def register_commenter_channels(bucket: str, gcs_paths: list[str], limit: int = None, concurrency: int = 3) -> None:
-#     db = firestore.Client()
-#     seen: Set[str] = set()
-#     total_new = 0
-#     model = get_xgb_model()
-
-#     async with PlaywrightContext() as context:
-#         sem = asyncio.Semaphore(concurrency)  # limit concurrent scrapes
-
-#         for path_idx, gcs_path in enumerate(gcs_paths, start=1):
-#             if limit and path_idx >= limit:
-#                 LOGGER.info(f"⚠️ Reached JSON file limit ({limit}) — stopping early.")
-#                 break
-
-#             data = read_json_from_gcs(bucket, gcs_path)
-#             items = data.get("items", []) if data else []
-
-#             async def process_thread(thread):
-#                 nonlocal total_new
-#                 top_snip = thread.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
-#                 if "authorChannelId" not in top_snip or top_snip.get("likeCount", 0) < LIKE_THRESHOLD:
-#                     return None
-
-#                 cid = top_snip["authorChannelId"]["value"]
-#                 if cid in seen:
-#                     return None
-#                 seen.add(cid)
-
-#                 async with sem:  # limit concurrency
-#                     batch = db.batch()
-#                     added = await _init_channel_doc(
-#                         context, batch, db, cid,
-#                         top_snip.get("authorProfileImageUrl"),
-#                         model
-#                     )
-#                     if added:
-#                         batch.commit()
-#                         total_new += 1
-#                         LOGGER.info(f"✅ Added {cid}")
-#                         return cid
-#                 return None
-
-#             # Run all threads concurrently (within concurrency limit)
-#             await asyncio.gather(*[
-#                 process_thread(thread)
-#                 for thread in items
-#             ])
-
-#             LOGGER.info(f"── {path_idx}/{len(gcs_paths):<3} "
-#                         f"{os.path.basename(gcs_path):<15} "
-#                         f"→ total so far: {total_new}")
-
-#     LOGGER.info(f"🎉 Done! {total_new} total new channels registered.")
-
-
-
-
-async def _init_channel_doc(context, batch, db, cid: str, avatar_url: Optional[str], model) -> bool:
+async def _init_channel_doc(
+    context: PlaywrightContext,
+    batch,
+    db: firestore.Client,
+    cid: str,
+    avatar_url: Optional[str],
+    model
+) -> bool:
+    """Initialize a channel document with avatar classification and About page data.
+    
+    Helper function for processing individual channels (legacy, kept for compatibility).
+    
+    Args:
+        context: Playwright context for scraping
+        batch: Firestore batch for writes
+        db: Firestore client
+        cid: Channel ID
+        avatar_url: URL to channel avatar image
+        model: XGBoost model for avatar classification
+        
+    Returns:
+        True if channel was added, False if skipped
+    """
     doc_ref = db.collection(COLLECTION_NAME).document(cid)
     if doc_ref.get().exists:
         return False
 
-
-    # --- Process avatar ---
+    # Process avatar
     label = "MISSING"
     metrics = {}
     if avatar_url:
@@ -334,14 +376,14 @@ async def _init_channel_doc(context, batch, db, cid: str, avatar_url: Optional[s
         except Exception as e:
             LOGGER.warning(f"⚠️ Avatar classification failed for {cid}: {e}")
 
-    # --- Scrape links & featured ---
+    # Scrape links and featured channels
     about_links, subs = await scrape_about_page(context, cid)
 
     if not about_links and not subs:
         LOGGER.info(f"⏭️ Skipping https://www.youtube.com/channel/{cid} — no links or featured channels found")
         return False
 
-    # --- Store channel ---
+    # Store channel
     batch.set(doc_ref, {
         "channel_id": cid,
         "avatar_url": avatar_url,
@@ -351,56 +393,20 @@ async def _init_channel_doc(context, batch, db, cid: str, avatar_url: Optional[s
         "featured_channels_count": len(subs),
         "is_screenshot_stored": False,
         "is_bot_checked": False,
-        "registered_at": datetime.utcnow(),
+        "registered_at": datetime.now(),
     })
     return True
 
 
-# def register_commenter_channels(bucket: str, gcs_paths: list[str]) -> None:
-#     db = firestore.Client()
-#     seen: Set[str] = set()
-#     total_new = 0
-#     model = get_xgb_model()
-
-#     for path_idx, gcs_path in enumerate(gcs_paths, start=1):
-#         data = read_json_from_gcs(bucket, gcs_path)
-#         items = data.get("items", []) if data else []
-#         num_threads = len(items)
-
-#         batch = db.batch()
-#         new_this_file = 0
-
-#         for thread in items:
-#             top_snip = thread.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
-#             if "authorChannelId" in top_snip and top_snip.get("likeCount", 0) >= LIKE_THRESHOLD:
-#                 cid = top_snip["authorChannelId"]["value"]
-#                 if cid not in seen:
-#                     seen.add(cid)
-#                     _init_channel_doc(batch, db, cid, top_snip.get("authorProfileImageUrl"), model)
-#                     new_this_file += 1
-
-#             for reply in thread.get("replies", {}).get("comments", []):
-#                 snip = reply.get("snippet", {})
-#                 if "authorChannelId" in snip and snip.get("likeCount", 0) >= LIKE_THRESHOLD:
-#                     cid = snip["authorChannelId"]["value"]
-#                     if cid not in seen:
-#                         seen.add(cid)
-#                         _init_channel_doc(batch, db, cid, snip.get("authorProfileImageUrl"), model)
-#                         new_this_file += 1
-
-#         LOGGER.info(f"── {path_idx}/{len(gcs_paths):<3} "
-#                     f"{os.path.basename(gcs_path):<15} "
-#                     f"({num_threads:>3} threads) → {new_this_file} new channels")
-
-#         if new_this_file:
-#             batch.commit()
-#             total_new += new_this_file
-
-#     LOGGER.info(f"🎉 Finished: {len(gcs_paths)} files, {total_new} total new channels (≥{LIKE_THRESHOLD} likes)")
-
-
-def backfill_bot_probabilities(limit: int = 5000):
-    """Recompute bot_probability for existing channels missing it."""
+def backfill_bot_probabilities(limit: int = 5000) -> None:
+    """Recompute bot_probability for existing channels missing it.
+    
+    Backfills avatar metrics and bot probabilities for channels that
+    were registered before the XGBoost model was available.
+    
+    Args:
+        limit: Maximum number of channels to process
+    """
     db = firestore.Client()
     model = get_xgb_model()
     snaps = db.collection(COLLECTION_NAME).limit(limit).stream()
@@ -438,37 +444,12 @@ def backfill_bot_probabilities(limit: int = 5000):
     LOGGER.info(f"🎉 Backfill finished: {updated} channels updated with bot_probability")
 
 
-# def _init_channel_doc(batch, db, cid: str, avatar_url: Optional[str], model) -> None:
-#     doc_ref = db.collection(COLLECTION_NAME).document(cid)
-#     if doc_ref.get().exists:
-#         return
-
-#     label = "MISSING"
-#     metrics = {}
-#     if avatar_url:
-#         try:
-#             label, metrics = classify_avatar_url(avatar_url, size=128, model=model)
-#             if label == "DEFAULT":
-#                 LOGGER.info(f"🚫 Skipping default avatar {cid}")
-#                 return
-#         except Exception as e:
-#             LOGGER.warning(f"⚠️ Avatar classification failed for {cid}: {e}")
-
-#     batch.set(doc_ref, {
-#         "channel_id": cid,
-#         "avatar_url": avatar_url,
-#         "avatar_label": label,
-#         "avatar_metrics": metrics,
-#         "is_screenshot_stored": False,
-#         "is_bot_checked": False,
-#         "registered_at": datetime.utcnow(),
-#     })
-
-
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Register or backfill commenter channels with bot probabilities.")
+    parser = argparse.ArgumentParser(
+        description="Register commenter channels or backfill bot probabilities"
+    )
     parser.add_argument("--bucket", help="GCS bucket name")
     parser.add_argument("--gcs_paths", nargs="*", help="Paths to video_comments/raw/*.json")
     parser.add_argument("--backfill", action="store_true", help="Run in backfill mode")
@@ -480,4 +461,5 @@ if __name__ == "__main__":
     else:
         if not args.bucket or not args.gcs_paths:
             raise SystemExit("❌ Need --bucket and --gcs_paths unless --backfill is used")
-        register_commenter_channels(args.bucket, args.gcs_paths)
+        asyncio.run(register_commenter_channels(args.bucket, args.gcs_paths))
+

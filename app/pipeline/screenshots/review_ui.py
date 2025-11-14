@@ -1,40 +1,79 @@
-#review_channel_screenshots.py
+"""Interactive screenshot review UI for bot detection.
 
-import cv2, numpy as np, logging, os, requests
-from typing import List, Dict
-from google.cloud import firestore, storage
+Provides a two-stage review interface:
+1. Avatar grid view for quick browsing
+2. Full screenshot view for detailed inspection
+
+Uses OpenCV for UI rendering and Firestore for label storage.
+"""
+
+import cv2
+import logging
+import numpy as np
+import os
 import re
+import requests
 from datetime import datetime
+from typing import List, Dict, Optional
 
-LOGGER = logging.getLogger("review")
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+from google.cloud import firestore, storage
 
-
-LOGGER = logging.getLogger("avatar_annotator")
+LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 COLLECTION_NAME = "channel"
 AVATAR_SIZE = 128  # px
+BUCKET_NAME = os.getenv("SCREENSHOT_BUCKET", "yt-bot-screens")
+REVIEW_LIMIT = 200
+BATCH_SIZE = 6  # how many screenshots per screen (grid)
 
-BUCKET_NAME     = os.getenv("SCREENSHOT_BUCKET", "yt-bot-screens")
-REVIEW_LIMIT    = 200
-BATCH_SIZE      = 6   # how many screenshots per screen (grid)
 
-# ───── GCP clients ─────
+# ============================================================================
+# GCP Client Initialization
+# ============================================================================
+
 _db, _storage, _bucket = None, None, None
-def db():
+
+
+def db() -> firestore.Client:
+    """Get or create Firestore client.
+    
+    Returns:
+        Initialized Firestore client
+    """
     global _db
-    if _db is None: _db = firestore.Client()
+    if _db is None:
+        _db = firestore.Client()
     return _db
-def bucket():
+
+
+def bucket() -> storage.Bucket:
+    """Get or create GCS bucket reference.
+    
+    Returns:
+        Initialized storage bucket
+    """
     global _storage, _bucket
     if _storage is None:
         _storage = storage.Client()
         _bucket = _storage.bucket(BUCKET_NAME)
     return _bucket
 
-# ───── GCS → OpenCV ─────
-def load_png(gcs_uri: str, target_crop_h: int = 800):
+
+# ============================================================================
+# Image Loading and Processing
+# ============================================================================
+
+def load_png(gcs_uri: str, target_crop_h: int = 800) -> Optional[np.ndarray]:
+    """Load and crop PNG screenshot from GCS.
+    
+    Args:
+        gcs_uri: GCS URI (gs://bucket/path)
+        target_crop_h: Target height to crop to (keeps top portion)
+        
+    Returns:
+        Cropped image as numpy array, or None if failed
+    """
     if not gcs_uri or not gcs_uri.startswith("gs://"):
         return None
     bkt, path = gcs_uri[5:].split("/", 1)
@@ -58,9 +97,23 @@ def load_png(gcs_uri: str, target_crop_h: int = 800):
         LOGGER.warning("⚠️ Failed to load %s: %s", gcs_uri, e)
         return None
 
+
+# ============================================================================
+# Firestore Query
+# ============================================================================
+
+def fetch_docs(limit: int = 200) -> List[firestore.DocumentSnapshot]:
+    """Fetch channel documents needing manual review.
     
-# ───── Firestore query ─────
-def fetch_docs(limit=200):
+    Queries for channels with screenshots but no bot labels yet,
+    sorted by bot probability (highest first).
+    
+    Args:
+        limit: Maximum number of documents to fetch
+        
+    Returns:
+        List of Firestore document snapshots
+    """
     snaps = (
         db.collection(COLLECTION_NAME)
           .where("is_screenshot_stored", "==", True)
@@ -81,9 +134,34 @@ def fetch_docs(limit=200):
     return docs
 
 
+# ============================================================================
+# Batch Preprocessing
+# ============================================================================
 
-def preprocess_docs(docs, batch_size=6, width=800, crop_h=800, cols=2):
-    """Download, resize, crop, and precompose batches into grid images."""
+def preprocess_docs(
+    docs: List[firestore.DocumentSnapshot],
+    batch_size: int = 6,
+    width: int = 800,
+    crop_h: int = 800,
+    cols: int = 2
+) -> tuple:
+    """Download, resize, crop, and compose batches into grid images.
+    
+    Prepares screenshot batches for display in the review UI by loading
+    images from GCS, resizing them, and arranging them in a grid layout.
+    
+    Args:
+        docs: List of Firestore document snapshots
+        batch_size: Number of screenshots per batch
+        width: Target width for each screenshot
+        crop_h: Target height to crop each screenshot to
+        cols: Number of columns in grid layout
+        
+    Returns:
+        Tuple of (batches, coords_per_batch) where:
+            - batches: List of grid images (numpy arrays)
+            - coords_per_batch: List of coordinate maps for click detection
+    """
     batches = []
     coords_per_batch = []
     total = len(docs)
@@ -161,98 +239,47 @@ def preprocess_docs(docs, batch_size=6, width=800, crop_h=800, cols=2):
     return batches, coords_per_batch
 
 
+# ============================================================================
+# Helper Utilities
+# ============================================================================
 
+# Initialize GCP clients for helper functions
+_db_client = firestore.Client()
+_storage_client = storage.Client()
+_bucket_client = _storage_client.bucket("yt-bot-screens")
 
-# ───── GUI loop ─────
-# def review_docs(docs: List[firestore.DocumentSnapshot]):
-#     if not docs:
-#         LOGGER.info("Nothing to review.")
-#         return
-
-#     # 🔹 Preload everything into memory
-#     batches, coords_per_batch = preprocess_docs(docs, batch_size=4, width=1000, crop_h=1000)
-
-#     WIN = "Annotate (click = bot, k next, j back, q quit)"
-#     selected: set[int] = set()
-#     index = 0  # current batch index
-
-#     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-
-#     def render_and_show():
-#         """Show the preloaded grid with red rectangles on selected items."""
-#         grid = batches[index].copy()
-#         coords_map = coords_per_batch[index]
-#         for idx in coords_map:
-#             if idx in selected:
-#                 x, y, w, h = coords_map[idx]
-#                 cv2.rectangle(grid, (x, y), (x+w-1, y+h-1), (0, 0, 255), 8)
-#         cv2.imshow(WIN, grid)
-#         return coords_map
-
-#     coords_map = render_and_show()
-
-#     def mouse_click(event, x, y, flags, param):
-#         nonlocal coords_map, selected
-#         if event == cv2.EVENT_LBUTTONDOWN:
-#             for idx, (ix, iy, iw, ih) in coords_map.items():
-#                 if ix <= x < ix+iw and iy <= y < iy+ih:
-#                     if idx in selected:
-#                         selected.remove(idx)
-#                     else:
-#                         selected.add(idx)
-#                     coords_map = render_and_show()
-#                     break
-
-#     cv2.setMouseCallback(WIN, mouse_click)
-
-#     while True:
-#         k = cv2.waitKeyEx(0)
-
-#         if k in (ord("q"), 27):  # quit
-#             break
-#         elif k in (ord("k"),):  # next batch
-#             if index < len(batches)-1:
-#                 index += 1
-#                 coords_map = render_and_show()
-#         elif k in (ord("j"),):  # prev batch
-#             if index > 0:
-#                 index -= 1
-#                 coords_map = render_and_show()
-
-#     cv2.destroyAllWindows()
-
-#     # 🔹 Write back only seen docs
-#     seen_idxs = set().union(*coords_per_batch[: index+1])  # everything user paged through
-#     batch = db().batch()
-#     now = firestore.SERVER_TIMESTAMP
-#     for i in seen_idxs:
-#         snap = docs[i]
-#         is_bot = (i in selected)
-#         snap.reference.update({
-#             "is_bot": is_bot,
-#             "is_bot_check_type": "manual",
-#             "is_bot_checked": True,
-#             "is_bot_set_at": now,
-#             "last_checked_at": now,
-#         })
-#     LOGGER.info(f"✅ Wrote {len(seen_idxs)} labels to Firestore (bots={len(selected)}, not_bots={len(seen_idxs)-len(selected)})")
-
-
-# ───── Firestore + GCS ─────
-db = firestore.Client()
-storage_client = storage.Client()
-bucket = storage_client.bucket("yt-bot-screens")
 
 def upgrade_avatar_url(url: str, target_size: int = 256) -> str:
-    """
-    Replace the size component (=sXX-) in a YouTube avatar URL with =s{target_size}-.
+    """Convert low-resolution avatar URL to higher resolution.
+    
+    YouTube avatar URLs contain size parameters (e.g., s88-c-k-c0x00ffffff-no-rj).
+    This function replaces the size component to request higher resolution avatars.
+    
+    Args:
+        url: Original avatar URL
+        target_size: Desired size in pixels (default: 256)
+        
+    Returns:
+        Modified URL with higher resolution parameters
     """
     if not url:
         return url
     return re.sub(r"=s\d+-", f"=s{target_size}-", url)
 
-def download_image(url: str, size=AVATAR_SIZE):
-    """Download avatar from URL and resize to square."""
+
+def download_image(url: str, size: int = AVATAR_SIZE) -> np.ndarray:
+    """Download avatar from URL and resize to square.
+    
+    Fetches the avatar image from a YouTube URL, upgrades it to higher
+    resolution, and resizes it to the specified size.
+    
+    Args:
+        url: Avatar image URL
+        size: Target size for square avatar (default: AVATAR_SIZE constant)
+        
+    Returns:
+        Resized avatar image as numpy array, or gray placeholder on failure
+    """
     if not url:
         return np.ones((size, size, 3), np.uint8) * 200
     try:
@@ -268,13 +295,25 @@ def download_image(url: str, size=AVATAR_SIZE):
         LOGGER.warning(f"⚠️ Failed to load avatar {url}: {e}")
         return np.ones((size, size, 3), np.uint8) * 200
 
-def download_screenshot(gcs_uri: str, max_w=1200):
-    """Fetch full screenshot from GCS."""
+
+def download_screenshot(gcs_uri: str, max_w: int = 1200) -> Optional[np.ndarray]:
+    """Fetch full screenshot from GCS.
+    
+    Downloads a channel screenshot from Google Cloud Storage and optionally
+    resizes it to fit within the specified maximum width.
+    
+    Args:
+        gcs_uri: GCS URI (e.g., gs://bucket/path/to/image.png)
+        max_w: Maximum width to resize to (default: 1200)
+        
+    Returns:
+        Screenshot image as numpy array, or None if download fails
+    """
     if not gcs_uri or not gcs_uri.startswith("gs://"):
         return None
     bkt, path = gcs_uri[5:].split("/", 1)
-    blob = (storage_client.bucket(bkt).blob(path) 
-            if bkt != bucket.name else bucket.blob(path))
+    blob = (_storage_client.bucket(bkt).blob(path) 
+            if bkt != _bucket_client.name else _bucket_client.blob(path))
     data = blob.download_as_bytes()
     arr  = np.frombuffer(data, dtype=np.uint8)
     img  = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -284,8 +323,29 @@ def download_screenshot(gcs_uri: str, max_w=1200):
     return img
 
 
-def review_docs(docs: List[firestore.DocumentSnapshot]):
-    """Stage 1: Avatar grid → Stage 2: Screenshot view."""
+# ============================================================================
+# Main Review UI
+# ============================================================================
+
+def review_docs(docs: List[firestore.DocumentSnapshot]) -> set:
+    """Interactive two-stage UI for manual bot detection review.
+    
+    Provides a two-stage review process:
+    1. Avatar grid view: Browse channels quickly
+    2. Screenshot view: Click an avatar to see full screenshot and label
+    
+    Controls:
+    - Click avatar: Open full screenshot
+    - b/n in screenshot view: Mark as bot/not-bot
+    - k/j in grid: Next/previous page
+    - q: Quit and save labels
+    
+    Args:
+        docs: List of Firestore channel documents to review
+        
+    Returns:
+        Set of channel IDs that were labeled
+    """
     if not docs:
         LOGGER.info("No docs to review")
         return
@@ -362,7 +422,7 @@ def review_docs(docs: List[firestore.DocumentSnapshot]):
             for cid, (ix, iy, iw, ih) in coords_map.items():
                 if ix <= x < ix+iw and iy <= y < iy+ih:
                     # Stage 2: show screenshot
-                    snap = db.collection(COLLECTION_NAME).document(cid).get()
+                    snap = _db_client.collection(COLLECTION_NAME).document(cid).get()
                     gcs_uri = snap.get("screenshot_gcs_uri")
                     big = download_screenshot(gcs_uri)
                     if big is None:
@@ -403,9 +463,9 @@ def review_docs(docs: List[firestore.DocumentSnapshot]):
 
     cv2.destroyAllWindows()
 
-    # 🔹 Write back: all seen → at least "not bot"
-    batch = db.batch()
-    now = datetime.utcnow()
+    # Write back: all seen channels get labeled
+    batch = _db_client.batch()
+    now = datetime.now()
     for snap in docs:
         cid = snap.id
         if cid not in seen:
