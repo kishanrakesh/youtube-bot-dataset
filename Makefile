@@ -8,6 +8,12 @@ SCREENSHOT_LIMIT = 200
 REVIEW_LIMIT = 100
 EXPAND_USE_API ?= true
 
+# Google Search expansion defaults
+LIMIT ?= 10
+MAX_RESULTS ?= 10
+VALIDATE ?= true
+DRY_RUN ?= false
+
 # ───── Pipeline commands ─────
 
 .PHONY: fetch-trending
@@ -65,6 +71,21 @@ expand-channel:
 	python -m app.pipeline.channels.expand_single \
 		$(IDENTIFIER) \
 		$(if $(filter true,$(EXPAND_USE_API)),--use-api,--no-use-api)
+
+.PHONY: expand-from-google-search
+expand-from-google-search:
+	@echo "🔍 Expanding bot graph from Google Custom Search..."
+	python -m app.pipeline.channels.expand_from_google_search \
+		--limit $(LIMIT) \
+		--max-results-per-channel $(MAX_RESULTS) \
+		$(if $(filter true,$(EXPAND_USE_API)),--use-api,--no-use-api) \
+		$(if $(filter true,$(VALIDATE)),--validate,--no-validate) \
+		$(if $(filter true,$(DRY_RUN)),--dry-run,)
+
+.PHONY: expand-from-google-search-dry
+expand-from-google-search-dry:
+	@echo "🔍 [DRY RUN] Expanding bot graph from Google Custom Search..."
+	make expand-from-google-search DRY_RUN=true
 
 # ───── End-to-end workflows ─────
 

@@ -115,7 +115,7 @@ def fetch_docs(limit: int = 200) -> List[firestore.DocumentSnapshot]:
         List of Firestore document snapshots
     """
     snaps = (
-        db.collection(COLLECTION_NAME)
+        db().collection(COLLECTION_NAME)
           .where("is_screenshot_stored", "==", True)
           .where("is_bot_checked", "==", False)
           .limit(limit)
