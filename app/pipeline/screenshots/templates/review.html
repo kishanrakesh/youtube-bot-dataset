@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Channel Review - Bot Detection</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }
+        
+        .header {
+            background: #2c3e50;
+            color: white;
+            padding: 1rem 2rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        
+        .header h1 {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .stats {
+            display: flex;
+            gap: 2rem;
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+        
+        .stats .stat {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .stats .stat-value {
+            font-weight: bold;
+            color: #3498db;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 2rem auto;
+            padding: 0 2rem;
+        }
+        
+        .controls {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .controls h2 {
+            margin-bottom: 1rem;
+            font-size: 1.2rem;
+        }
+        
+        .controls .buttons {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        
+        .btn {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary {
+            background: #3498db;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #2980b9;
+        }
+        
+        .btn-success {
+            background: #27ae60;
+            color: white;
+        }
+        
+        .btn-success:hover {
+            background: #229954;
+        }
+        
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 1rem;
+        }
+        
+        .channel-card {
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: pointer;
+        }
+        
+        .channel-card:hover {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        
+        .channel-card.labeled-bot {
+            border: 4px solid #e74c3c;
+        }
+        
+        .channel-card.labeled-not-bot {
+            border: 4px solid #27ae60;
+        }
+        
+        .avatar {
+            width: 100%;
+            height: 140px;
+            object-fit: cover;
+            cursor: pointer;
+            background: #ecf0f1;
+            display: block;
+        }
+        
+        .screenshot-modal-img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        
+        .channel-info {
+            padding: 0.5rem;
+            text-align: center;
+        }
+        
+        .channel-id {
+            font-family: 'Courier New', monospace;
+            font-size: 0.7rem;
+            color: #7f8c8d;
+            margin-bottom: 0.25rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        .bot-probability {
+            font-size: 0.85rem;
+            font-weight: bold;
+            margin-top: 0.25rem;
+        }
+        
+        .bot-probability.high {
+            color: #e74c3c;
+        }
+        
+        .bot-probability.medium {
+            color: #f39c12;
+        }
+        
+        .bot-probability.low {
+            color: #27ae60;
+        }
+        
+        .metrics {
+            display: none; /* Hide detailed metrics in grid view */
+        }
+        
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.25rem 0;
+            font-size: 0.9rem;
+        }
+        
+        .metric-label {
+            color: #7f8c8d;
+        }
+        
+        .metric-value {
+            font-weight: bold;
+        }
+        
+        .metric-value.high {
+            color: #e74c3c;
+        }
+        
+        .metric-value.medium {
+            color: #f39c12;
+        }
+        
+        .metric-value.low {
+            color: #27ae60;
+        }
+        
+        .actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+        
+        .actions button {
+            flex: 1;
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.9);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            padding: 2rem;
+        }
+        
+        .modal.active {
+            display: flex;
+        }
+        
+        .modal-content {
+            display: flex;
+            max-width: 95%;
+            max-height: 95%;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .modal-screenshot {
+            flex: 1;
+            overflow: auto;
+            background: #f5f5f5;
+        }
+        
+        .modal-screenshot img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        
+        .modal-sidebar {
+            width: 300px;
+            padding: 1.5rem;
+            background: white;
+            overflow-y: auto;
+        }
+        
+        .modal-sidebar h3 {
+            margin-bottom: 1rem;
+            font-size: 1.1rem;
+        }
+        
+        .modal-sidebar .channel-id {
+            word-break: break-all;
+            white-space: normal;
+            font-size: 0.8rem;
+            margin-bottom: 1rem;
+        }
+        
+        .modal-sidebar .metrics {
+            display: block;
+        }
+        
+        .modal-close {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            background: white;
+            color: #333;
+            border: none;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            font-size: 1.5rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            z-index: 1001;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: #7f8c8d;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 4rem 2rem;
+            background: white;
+            border-radius: 8px;
+        }
+        
+        .empty-state h2 {
+            color: #27ae60;
+            margin-bottom: 1rem;
+        }
+        
+        .keyboard-shortcuts {
+            background: #ecf0f1;
+            padding: 1rem;
+            border-radius: 4px;
+            margin-top: 1rem;
+            font-size: 0.85rem;
+        }
+        
+        .keyboard-shortcuts h3 {
+            margin-bottom: 0.5rem;
+            font-size: 1rem;
+        }
+        
+        .keyboard-shortcuts kbd {
+            background: white;
+            padding: 0.2rem 0.4rem;
+            border-radius: 3px;
+            border: 1px solid #bdc3c7;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🤖 Channel Review - Bot Detection</h1>
+        <div class="stats">
+            <div class="stat">
+                <span>Total:</span>
+                <span class="stat-value" id="stat-total">{{ total }}</span>
+            </div>
+            <div class="stat">
+                <span>Session Reviewed:</span>
+                <span class="stat-value" id="stat-reviewed">{{ reviewed }}</span>
+            </div>
+            <div class="stat">
+                <span>Remaining:</span>
+                <span class="stat-value" id="stat-remaining">{{ total - reviewed }}</span>
+            </div>
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="controls">
+            <h2>Controls</h2>
+            <div class="buttons">
+                <button class="btn btn-primary" onclick="refreshData()">🔄 Refresh Data</button>
+                <button class="btn btn-success" onclick="expandBotGraph()">🚀 Expand Bot Graph</button>
+                <button class="btn btn-success" onclick="labelUnmarkedAsNotBots()">✅ Mark All Unmarked as Not-Bots</button>
+            </div>
+            
+            <div class="keyboard-shortcuts">
+                <h3>⌨️ Keyboard Shortcuts</h3>
+                <p>
+                    Click screenshot to view full size • 
+                    <kbd>B</kbd> Mark as Bot • 
+                    <kbd>N</kbd> Mark as Not Bot •
+                    <kbd>ESC</kbd> Close modal
+                </p>
+            </div>
+        </div>
+        
+        <div id="channels-grid" class="grid">
+            {% if docs %}
+                {% for doc in docs %}
+                <div class="channel-card" data-channel-id="{{ doc.id }}" 
+                     data-screenshot-url="{{ doc.screenshot_url or '' }}"
+                     data-metrics="{{ doc.avatar_metrics|tojson if doc.avatar_metrics else '{}' }}"
+                     onclick="openModalFromCard(this)">
+                    <img 
+                        class="avatar" 
+                        src="{{ doc.avatar_display_url or '' }}"
+                        alt="Channel avatar"
+                        onerror="this.onerror=null; this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22140%22 height=%22140%22%3E%3Crect fill=%22%23ecf0f1%22 width=%22140%22 height=%22140%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 text-anchor=%22middle%22 fill=%22%237f8c8d%22 font-size=%2216%22%3E%3F%3C/text%3E%3C/svg%3E'"
+                    >
+                    
+                    <div class="channel-info">
+                        <div class="channel-id" title="{{ doc.id }}">{{ doc.id[:12] }}...</div>
+                        
+                        {% if doc.avatar_metrics and doc.avatar_metrics.get('bot_probability') is not none %}
+                        <div class="bot-probability {{ 'high' if doc.avatar_metrics.bot_probability > 0.7 else 'medium' if doc.avatar_metrics.bot_probability > 0.4 else 'low' }}">
+                            {{ "%.0f%%"|format(doc.avatar_metrics.bot_probability * 100) }}
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="empty-state">
+                    <h2>✨ All Done!</h2>
+                    <p>No more channels to review at the moment.</p>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+    
+    <div id="modal" class="modal" onclick="closeModal(event)">
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-screenshot">
+                <img id="modal-image" src="" alt="Full screenshot">
+            </div>
+            <div class="modal-sidebar">
+                <h3>Channel Details</h3>
+                <div class="channel-id" id="modal-channel-id"></div>
+                
+                <div class="metrics" id="modal-metrics">
+                    <!-- Metrics will be populated dynamically -->
+                </div>
+                
+                <div class="actions">
+                    <button class="btn btn-danger" onclick="labelFromModal(true)">
+                        🤖 Bot (B)
+                    </button>
+                    <button class="btn btn-success" onclick="labelFromModal(false)">
+                        ✅ Not Bot (N)
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let currentModalChannelId = null;
+        
+        function openModalFromCard(cardElement) {
+            const channelId = cardElement.dataset.channelId;
+            const screenshotUrl = cardElement.dataset.screenshotUrl;
+            const metricsJson = cardElement.dataset.metrics;
+            
+            let metrics = {};
+            try {
+                metrics = JSON.parse(metricsJson);
+            } catch (e) {
+                console.warn('Failed to parse metrics:', e);
+            }
+            
+            openModal(channelId, screenshotUrl, metrics);
+        }
+        
+        function openModal(channelId, screenshotUrl, metrics) {
+            const modal = document.getElementById('modal');
+            const modalImage = document.getElementById('modal-image');
+            const modalChannelId = document.getElementById('modal-channel-id');
+            const modalMetrics = document.getElementById('modal-metrics');
+            
+            // Set screenshot
+            modalImage.src = screenshotUrl;
+            
+            // Set channel ID
+            modalChannelId.textContent = channelId;
+            currentModalChannelId = channelId;
+            
+            // Populate metrics
+            modalMetrics.innerHTML = '';
+            if (metrics && Object.keys(metrics).length > 0) {
+                if (metrics.bot_probability !== undefined) {
+                    const probClass = metrics.bot_probability > 0.7 ? 'high' : 
+                                     metrics.bot_probability > 0.4 ? 'medium' : 'low';
+                    modalMetrics.innerHTML += `
+                        <div class="metric">
+                            <span class="metric-label">Bot Probability:</span>
+                            <span class="metric-value ${probClass}">
+                                ${(metrics.bot_probability * 100).toFixed(1)}%
+                            </span>
+                        </div>
+                    `;
+                }
+                if (metrics.entropy !== undefined) {
+                    modalMetrics.innerHTML += `
+                        <div class="metric">
+                            <span class="metric-label">Entropy:</span>
+                            <span class="metric-value">${metrics.entropy.toFixed(2)}</span>
+                        </div>
+                    `;
+                }
+                if (metrics.edge_density !== undefined) {
+                    modalMetrics.innerHTML += `
+                        <div class="metric">
+                            <span class="metric-label">Edge Density:</span>
+                            <span class="metric-value">${(metrics.edge_density * 100).toFixed(1)}%</span>
+                        </div>
+                    `;
+                }
+                if (metrics.hue_std !== undefined) {
+                    modalMetrics.innerHTML += `
+                        <div class="metric">
+                            <span class="metric-label">Hue Std Dev:</span>
+                            <span class="metric-value">${metrics.hue_std.toFixed(1)}</span>
+                        </div>
+                    `;
+                }
+            }
+            
+            modal.classList.add('active');
+        }
+        
+        function closeModal(event) {
+            if (!event || event.target.id === 'modal' || event.target.classList.contains('modal-close')) {
+                const modal = document.getElementById('modal');
+                modal.classList.remove('active');
+                currentModalChannelId = null;
+            }
+        }
+        
+        function labelFromModal(isBot) {
+            if (currentModalChannelId) {
+                labelChannel(currentModalChannelId, isBot);
+            }
+        }
+        
+        async function labelChannel(channelId, isBot) {
+            try {
+                const response = await fetch('/api/label', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        channel_id: channelId,
+                        is_bot: isBot
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Update card styling
+                    const card = document.querySelector(`[data-channel-id="${channelId}"]`);
+                    card.classList.remove('labeled-bot', 'labeled-not-bot');
+                    card.classList.add(isBot ? 'labeled-bot' : 'labeled-not-bot');
+                    
+                    // Update stats
+                    document.getElementById('stat-reviewed').textContent = data.reviewed_count;
+                    const total = parseInt(document.getElementById('stat-total').textContent);
+                    document.getElementById('stat-remaining').textContent = total - data.reviewed_count;
+                    
+                    // Close modal if open
+                    if (currentModalChannelId === channelId) {
+                        closeModal();
+                    }
+                    
+                    console.log(`✅ Labeled ${channelId} as ${isBot ? 'bot' : 'not-bot'}`);
+                } else {
+                    alert('Error labeling channel: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error labeling channel: ' + error.message);
+            }
+        }
+        
+        async function refreshData() {
+            location.reload();
+        }
+        
+        async function labelUnmarkedAsNotBots() {
+            const unmarkedChannels = Array.from(document.querySelectorAll('.channel-card:not(.labeled-bot):not(.labeled-not-bot)'))
+                .map(card => card.dataset.channelId);
+            
+            if (unmarkedChannels.length === 0) {
+                alert('No unmarked channels found. All channels have been labeled.');
+                return;
+            }
+            
+            if (!confirm(`Mark ${unmarkedChannels.length} unmarked channels as NOT-BOTS?\n\nThis will label all channels that you haven't manually reviewed yet.`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/label-bulk', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        channel_ids: unmarkedChannels,
+                        is_bot: false
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Update all unmarked cards to not-bot styling
+                    unmarkedChannels.forEach(channelId => {
+                        const card = document.querySelector(`[data-channel-id="${channelId}"]`);
+                        if (card) {
+                            card.classList.add('labeled-not-bot');
+                        }
+                    });
+                    
+                    // Update stats
+                    document.getElementById('stat-reviewed').textContent = data.reviewed_count;
+                    const total = parseInt(document.getElementById('stat-total').textContent);
+                    document.getElementById('stat-remaining').textContent = total - data.reviewed_count;
+                    
+                    alert(`✅ Successfully labeled ${data.labeled_count} channels as not-bots!`);
+                } else {
+                    alert('Error bulk labeling: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error bulk labeling: ' + error.message);
+            }
+        }
+        
+        async function expandBotGraph() {
+            const botChannels = Array.from(document.querySelectorAll('.labeled-bot'))
+                .map(card => card.dataset.channelId);
+            
+            if (botChannels.length === 0) {
+                alert('No bot channels labeled yet. Label some channels first.');
+                return;
+            }
+            
+            if (!confirm(`Expand bot graph from ${botChannels.length} labeled bot channels?`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/expand', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        channel_ids: botChannels
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    alert(`✅ Bot graph expansion started from ${data.expanded_from} channels!`);
+                } else {
+                    alert('Error expanding graph: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error expanding graph: ' + error.message);
+            }
+        }
+        
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (event) => {
+            // Only handle shortcuts when modal is open
+            if (currentModalChannelId) {
+                if (event.key === 'b' || event.key === 'B') {
+                    event.preventDefault();
+                    labelFromModal(true);
+                } else if (event.key === 'n' || event.key === 'N') {
+                    event.preventDefault();
+                    labelFromModal(false);
+                } else if (event.key === 'Escape') {
+                    closeModal();
+                }
+            }
+        });
+    </script>
+</body>
+</html>
