@@ -2,12 +2,33 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug register_commenters",
+      "name": "Debug expand_bot_graph",
       "type": "python",
       "request": "launch",
-      "module": "app.pipeline.register_commenters",
-      "justMyCode": true,
-      "args": ["--limit", "500"],
+      "module": "app.pipeline.expand_bot_graph",
+      "args": [
+        "UCgTRRibun77amxRi1uc9EOA",
+        "UC-fWrTMpghjSHsEbQvYH1XQ",
+        "UCD7ARwGla0xueTWqSpRIyUQ",
+        "UCHe31J2ktUfQfq07cIsT4jA",
+        "UCStvfPDs-QFPBZsnzPw7A8g",
+        "UCV6MGIHFzTBvJnu3jtnd--w",
+        "UCZKoOdYvPwCgFDUxET-uOlA",
+        "UCpPAsjLbhMTz5uILXbBMtVw",
+        "UCwKiG5iwzicbPHRvjuBi1Gw",
+        "UC2aDCA8VqZCQJYjC4bnKYyA",
+        "UCMW8W6BKXPbqIp0fSMJSW-w",
+        "UCPiBltR7ipeHeLEwB3qeaXw",
+        "UC_aiOP5vLsEiM4GkvnZj4XA",
+        "UCW4rYQJPY56NNjzvv67u2sA",
+        "UC9XZ9Ee8pX_wPykZKjVIIlA",
+        "UC-DEPNdm6zOw-wpyWp4mtPw",
+        "UCEgg9cvvcZvXRCqnpEu4e2g",
+        "UC4TSpYXlvej4a0SAkSzD0jA",
+        "UC9-xhfRFDYKmw20pZkvHeqw",
+        "UConMJeJTSHWHC-lRtjX_PWQ",
+        "UCex1fY65EeGlKYmGxL7woBA"
+      ]
       "envFile": "${workspaceFolder}/.env"
     }
   ]
