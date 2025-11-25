@@ -58,9 +58,14 @@ capture-screenshots:
 
 .PHONY: review
 review:
-	@echo "👀 Launching manual review UI..."
+	@echo "👀 Launching manual review UI (OpenCV)..."
 	python -m app.pipeline.screenshots.review \
 		--limit $(REVIEW_LIMIT)
+
+.PHONY: review-web
+review-web:
+	@echo "🌐 Launching web review interface..."
+	python -m app.pipeline.screenshots.review_web
 
 .PHONY: expand-channel
 expand-channel:

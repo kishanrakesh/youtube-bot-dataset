@@ -7,7 +7,7 @@ cd /root/youtube-bot-dataset
 source env/bin/activate
 
 # (If you use ADC) point to your service account JSON:
-# export GOOGLE_APPLICATION_CREDENTIALS="/root/youtube-bot-dataset/adc.json"
+export GOOGLE_APPLICATION_CREDENTIALS="/root/youtube-bot-dataset/config/service-account.json"
 
 # Optional: ensure Chromium path for Playwright is on PATH (usually not needed)
 # export PLAYWRIGHT_BROWSERS_PATH=$PWD/ms-playwright
