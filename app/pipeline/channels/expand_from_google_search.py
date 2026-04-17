@@ -241,7 +241,7 @@ def search_related_channels(
     # Since CSE is already restricted to youtube.com, just search for the handle text
     if search_patterns is None:
         search_patterns = [
-            bot_handle if bot_handle else None,
+            f"\"{bot_handle}\"" if bot_handle else None,  # Wrap handle in quotes for strict matching
             f"\"{bot_title}\"" if bot_title else None,
         ]
 

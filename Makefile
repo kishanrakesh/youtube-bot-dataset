@@ -9,8 +9,8 @@ REVIEW_LIMIT = 100
 EXPAND_USE_API ?= true
 
 # Google Search expansion defaults
-LIMIT ?= 10
-MAX_RESULTS ?= 10
+LIMIT ?= 1000
+MAX_RESULTS ?= 100
 VALIDATE ?= true
 DRY_RUN ?= false
 
@@ -112,6 +112,11 @@ register-capture-loop:
 		echo "✅ Finished run $$i"; \
 		sleep 60; \
 	done
+
+.PHONY: bot-comment-analysis
+bot-comment-analysis:
+	@echo "🤖 Counting bot top-level comments in GCS logs..."
+	python -m scripts.analysis.bot_comment_analysis
 
 .PHONY: all-categories
 all-categories:
